@@ -14,7 +14,7 @@ pub struct Inner {
 
 impl Inner {
     /// `serde_json` of the workspace (`groups`, `sample_gates`,
-    /// `sample_channel_settings`, ...) plus `gates` (the "All Samples"
+    /// `sample_channel_settings`, `layouts`, `ui_state`, ...) plus `gates` (the "All Samples"
     /// template, as in version 1), `loaded` and `path`: the `WorkspaceView`.
     pub fn view(&self) -> Result<Value, String> {
         let mut v = serde_json::to_value(&self.workspace).map_err(|e| e.to_string())?;

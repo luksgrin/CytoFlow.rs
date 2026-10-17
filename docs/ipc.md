@@ -43,6 +43,8 @@ type SampleInfo = { id: string; name: string; path: string; event_count: number;
 type CompMatrix = { channels: string[]; spillover: number[][] };  // row-major spillover
 type CompSource = { source: "none" } | { source: "fcs" } | { source: "custom"; matrix: CompMatrix };
 
+type Layout = { id: string; name: string; data: unknown };        // data = the frontend's layout document, stored verbatim
+
 type WorkspaceView = {
   version: number; name: string;                                // version = 2
   samples: SampleInfo[];
@@ -52,6 +54,8 @@ type WorkspaceView = {
   groups: Group[];                                              // groups[0] is always { id: "all", name: "All Samples" }
   sample_gates: Record<string, SampleGateNode[]>;               // sample id → that sample's own tree (flat, tree via `parent`)
   gates: GateNode[];                                            // = groups[0].gates (the "All Samples" template), kept for compatibility
+  layouts: Layout[];                                            // named layout-editor pages (saved in the workspace file)
+  ui_state: unknown;                                            // UI preferences (last axes per sample, overlays); null if never set
   loaded: string[];                                             // sample ids whose FCS data is in memory
   path: string | null;                                          // where the workspace was last saved/opened
 };
@@ -102,6 +106,10 @@ type Tick            = { pos: number; label: string; major: boolean };  // pos i
 | `workspace_open` | `{ path }` | `{ workspace: WorkspaceView, errors: string[] }` (our JSON format) |
 | `workspace_save` | `{ path }` | `WorkspaceView` |
 | `workspace_import_wsp` | `{ path, searchDirs: string[] }` | `{ workspace: WorkspaceView, warnings: string[], missing: {name: string, path: string}[] }` |
+| `layouts_get` | – | `Layout[]` |
+| `layouts_set` | `{ layouts: Layout[] }` | `WorkspaceView` (replaces all layouts; saved by `workspace_save`) |
+| `ui_state_get` | – | `unknown` (`null` when never set) |
+| `ui_state_set` | `{ uiState: unknown }` | `WorkspaceView` (replaces the UI state; saved by `workspace_save`) |
 | `sample_add` | `{ paths: string[] }` | `{ workspace: WorkspaceView, errors: string[] }` |
 | `sample_remove` | `{ sampleId }` | `WorkspaceView` |
 | `sample_keywords` | `{ sampleId }` | `Record<string,string>` (full TEXT segment) |
@@ -156,8 +164,10 @@ paths to the commands above. The backend only needs `dialog:default` and the
 ## Workspace file format
 
 `*.cfw.json` — the `serde_json` of `Workspace`: version 2 stores `samples`,
-`channel_settings`, `sample_channel_settings`, `compensation`, `groups` and
-`sample_gates` (no top-level `gates`). Version-1 files (a single shared `gates`
+`channel_settings`, `sample_channel_settings`, `compensation`, `groups`, `sample_gates`,
+`layouts` and `ui_state` (no top-level `gates`). `layouts` and `ui_state` are
+opaque to the core (the frontend owns their shape) and default to `[]` /
+`null` for files written before they existed. Version-1 files (a single shared `gates`
 list) are still read: the list becomes the "All Samples" template and is copied
 into every sample. Sample paths are stored absolute; on open the core also
 looks for the file name next to the workspace file.
