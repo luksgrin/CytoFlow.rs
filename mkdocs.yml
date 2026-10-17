@@ -1,0 +1,88 @@
+site_name: CytoFlow.rs
+site_description: Free, open-source flow cytometry analysis for macOS, Windows and Linux (Rust + Tauri)
+site_author: Lucas Goiriz
+site_url: https://luksgrin.xyz/CytoFlow.rs/
+
+repo_name: luksgrin/CytoFlow.rs
+repo_url: https://github.com/luksgrin/CytoFlow.rs
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.annotate
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - admonition
+  - pymdownx.details
+  - pymdownx.keys
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - attr_list
+  - toc:
+      permalink: true
+
+# docs/README.md describes this folder for people browsing the repository;
+# it is not part of the site (it would clash with index.md).
+exclude_docs: |
+  README.md
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - User Guide:
+      - Overview: usage/index.md
+      - Workspace and samples: usage/workspace.md
+      - The graph window: usage/graph.md
+      - Gating: usage/gating.md
+      - Statistics and export: usage/statistics-export.md
+      - Layouts and batch view: usage/layout.md
+      - Importing FlowJo workspaces: usage/flowjo-import.md
+      - Keyboard shortcuts: usage/shortcuts.md
+  - Coming from Flow Cytometry Analyzer: migration.md
+  - Reference:
+      - File formats: formats.md
+      - Validation: validation.md
+      - IPC contract: ipc.md
+  - Development:
+      - Building from Source: building.md
+      - Releasing: releasing.md
+      - Deploying the docs: DEPLOYMENT.md
+  - Troubleshooting: troubleshooting.md
+
+plugins:
+  - search
+  - git-revision-date-localized:
+      enable_creation_date: true
+      fallback_to_build_date: true
+
+copyright: Copyright &copy; 2026 Lucas Goiriz &middot; MIT License
