@@ -6,7 +6,7 @@
 //! anything from the FlowJo program itself.
 //!
 //! Imported: sample list, per-channel transforms (`linear`, `log`, `logicle`,
-//! `fasinh`, FlowJo `biex` approximated as logicle), the first spillover
+//! `fasinh`, FlowJo `biex`), the first spillover
 //! matrix, and the population tree (rectangle/quadrant, polygon, ellipsoid
 //! and boolean `And/Or/Not` nodes) of each sample.
 

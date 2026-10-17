@@ -16,7 +16,8 @@ code or assets derived from any commercial product.
 * **FCS reader**: FCS 2.0 / 3.0 / 3.1, integer / float / double data, both byte
   orders, per-parameter bit widths, `$PnE` log amplification, `$PnG` gain,
   `$SPILLOVER` / `SPILL` / `$COMP` matrices.
-* **Scales**: linear, log, arcsinh and logicle (biexponential), with automatic
+* **Scales**: linear, log, arcsinh, logicle and a FlowJo-compatible biexponential
+  (`biex`, verified against a FlowJo-exported lookup table), with automatic
   logicle width estimation and editable parameters. Changing a scale re-maps
   existing gates so they keep their meaning.
 * **Compensation**: from the file's own matrix, none, or a custom editable matrix.
@@ -27,8 +28,8 @@ code or assets derived from any commercial product.
 * **Statistics**: count, % of parent, % of total, per-channel mean / median /
   CV / SD / geometric mean; CSV export of populations and statistics tables.
 * **FlowJo `.wsp` import**: samples, transforms, compensation matrix and the
-  gate tree (rectangle / quadrant, polygon, ellipsoid, Boolean nodes).
-  FlowJo's `biex` scale is approximated by a logicle scale.
+  gate tree (rectangle / quadrant, polygon, ellipsoid, Boolean nodes), with
+  `biex` scales imported exactly.
 * **Workspace files**: plain JSON (`*.cfw.json`).
 
 ## Layout

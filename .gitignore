@@ -11,3 +11,5 @@ src-tauri/gen/schemas
 /FlowJo VX/
 # Large test data (fetched by scripts/fetch-testdata.sh)
 /testdata/large/
+# Agent worktrees
+.claude/worktrees/

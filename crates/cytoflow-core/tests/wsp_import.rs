@@ -28,11 +28,10 @@ const LOGICLE_TOL: f64 = 0.002;
 /// fraction of the parent population: at most 0.1 % of the parent's events
 /// may be classified differently.
 const PARENT_TOL: f64 = 0.001;
-/// FlowJo's `biex` is approximated by a logicle scale; the agreement of
-/// gates on biex axes is tracked with a loose bound. (The biex fixtures only
-/// contain rectangles/quadrants, whose membership does not depend on any
-/// monotonic axis transform, so they are in fact exact.)
-const BIEX_TOL: f64 = 0.05;
+/// Gates on `biex` axes: the transform is now exact (see `tests/biex_flowjo_table.rs`
+/// and `tests/wsp_biex_polygon.rs`), and these fixtures only contain
+/// rectangles/quadrants, so the counts must match exactly.
+const BIEX_TOL: f64 = 0.0;
 /// The FlowJo ellipse on logicle axes: its geometry is exact on linear axes
 /// (tests/wsp_ellipse.rs), but on these logicle axes it undercounts FlowJo
 /// by 2.0 / 2.1 / 3.1 % (E03 / E05 / E01; 5875 vs 6002, 6010 vs 6133,
@@ -223,7 +222,7 @@ fn reused_quad_gate_with_child_biex() {
     };
     let worst = rows.iter().map(Row::rel).fold(0.0, f64::max);
     println!(
-        "[{wsp}] worst relative difference (biex approximated as logicle): {:.4} %",
+        "[{wsp}] worst relative difference (biex): {:.4} %",
         100.0 * worst
     );
     assert_within(wsp, &rows, BIEX_TOL);
@@ -237,7 +236,7 @@ fn diamond_biex_rect() {
     };
     let worst = rows.iter().map(Row::rel).fold(0.0, f64::max);
     println!(
-        "[{wsp}] worst relative difference (biex approximated as logicle): {:.4} %",
+        "[{wsp}] worst relative difference (biex): {:.4} %",
         100.0 * worst
     );
     assert_within(wsp, &rows, BIEX_TOL);

@@ -16,7 +16,8 @@ type Transform =
   | { kind: "linear";  t: number; a: number }
   | { kind: "log";     t: number; m: number }
   | { kind: "asinh";   t: number; m: number; a: number }
-  | { kind: "logicle"; t: number; w: number; m: number; a: number };
+  | { kind: "logicle"; t: number; w: number; m: number; a: number }
+  | { kind: "biex";    t: number; w: number; pos: number; neg: number }; // FlowJo-style: w = width basis (≤ 0, e.g. -100)
 // All transforms map the instrument range onto ~[0, 1] ("display space").
 // Plots cover display range [-0.02, 1.02] on each axis (events are clamped into it).
 
@@ -66,7 +67,7 @@ type Tick            = { pos: number; label: string; major: boolean };  // pos i
 | `sample_remove` | `{ sampleId }` | `WorkspaceView` |
 | `sample_keywords` | `{ sampleId }` | `Record<string,string>` (full TEXT segment) |
 | `channel_set_transform` | `{ channel, transform: Transform }` | `WorkspaceView` (gate coords are re-mapped by the core) |
-| `channel_default_transform` | `{ channel, kind: "linear"\|"log"\|"asinh"\|"logicle", sampleId }` | `Transform` (defaults estimated from that sample's data) |
+| `channel_default_transform` | `{ channel, kind: "linear"\|"log"\|"asinh"\|"logicle"\|"biex", sampleId }` | `Transform` (defaults estimated from that sample's data) |
 | `compensation_set` | `{ comp: CompSource }` | `WorkspaceView` |
 | `compensation_matrix` | `{ sampleId }` | `CompMatrix \| null` (effective matrix for that sample) |
 | `gate_add` | `{ name, parent: string\|null, shape: GateShape, negate: boolean }` | `{ id: string, workspace: WorkspaceView }` |
