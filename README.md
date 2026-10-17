@@ -21,13 +21,17 @@ code or assets derived from any commercial product.
   existing gates so they keep their meaning.
 * **Compensation**: from the file's own matrix, none, or a custom editable matrix.
 * **Gating**: rectangle, range, polygon, ellipse, quadrant and Boolean (and / or /
-  not) gates in a population hierarchy shared across samples.
+  not) gates in a population hierarchy. Sample groups carry template gate trees
+  (the built-in "All Samples" group contains every sample); each sample owns its
+  own tree, which can be tailored per sample and pushed back to a group.
+  Transforms can be overridden per sample.
 * **Plots**: pseudo-colour dot plot, density, contour and histogram, with
   proper decade tick marks on log-like axes; a batch grid across samples.
 * **Statistics**: count, % of parent, % of total, per-channel mean / median /
   CV / SD / geometric mean; CSV export of populations and statistics tables.
-* **FlowJo `.wsp` import**: samples, transforms, compensation matrix and the
-  gate tree (rectangle / quadrant, polygon, ellipsoid, Boolean nodes).
+* **FlowJo `.wsp` import**: samples, per-sample transforms, compensation matrix,
+  groups and each sample's own gate tree (rectangle / quadrant, polygon,
+  ellipsoid, Boolean nodes).
   FlowJo's `biex` scale is approximated by a logicle scale.
 * **Workspace files**: plain JSON (`*.cfw.json`).
 

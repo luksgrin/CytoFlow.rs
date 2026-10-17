@@ -13,9 +13,10 @@ this crate only wires commands, state and the window.
 | `workspace_open`, `workspace_save` | load / save `*.cfw.json` |
 | `workspace_import_wsp` | import a FlowJo `.wsp` |
 | `sample_add`, `sample_remove`, `sample_keywords` | manage FCS samples |
-| `channel_set_transform`, `channel_default_transform`, `axis_ticks` | axis transforms |
+| `channel_set_transform`, `channel_default_transform`, `axis_ticks` | axis transforms (default or per-sample) |
 | `compensation_set`, `compensation_matrix` | compensation |
-| `gate_add`, `gate_update`, `gate_remove` | gate hierarchy |
+| `group_list`, `group_create`, `group_set_members`, `group_remove` | sample groups |
+| `gate_add`, `gate_update`, `gate_remove`, `gate_copy_to_group` | gate trees (group or sample scope) |
 | `population_stats`, `channel_stats` | statistics |
 | `plot_hist`, `plot_2d` (binary `CFP1` response) | plot data |
 | `export_population_csv`, `export_stats_csv` | CSV export |
