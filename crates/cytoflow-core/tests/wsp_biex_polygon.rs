@@ -38,7 +38,7 @@ fn counts(edit: impl Fn(&str) -> String) -> Option<Vec<(String, usize, usize)>> 
     assert!(imp.missing_files.is_empty(), "{:?}", imp.missing_files);
     let ws = &mut imp.workspace;
     let sid = ws.samples[0].id.clone();
-    let gates: Vec<(String, String)> = ws.gates.iter().map(|g| (g.id.clone(), ws.gate_path(&g.id))).collect();
+    let gates: Vec<(String, String)> = ws.sample_tree(&sid).unwrap().iter().map(|g| (g.id.clone(), ws.gate_path(&sid, &g.id))).collect();
     let mut out = Vec::new();
     for ec in &imp.expected_counts {
         let (gid, _) = gates.iter().find(|(_, p)| *p == ec.gate_path).expect("population imported");
@@ -53,7 +53,8 @@ fn flowsom_biex_polygons_match_flowjo() {
     let Some(rows) = counts(|s| s.to_string()) else { return };
     // The fixture really exercises biex polygons.
     let imp = import_wsp(fixture_dir().join("gating.wsp"), &[]).unwrap();
-    assert!(matches!(imp.workspace.transform_for("APC-A"), Transform::Biex { .. }));
+    let sid0 = imp.workspace.samples[0].id.clone();
+    assert!(matches!(imp.workspace.transform_for(&sid0, "APC-A"), Transform::Biex { .. }));
     for (path, flowjo, ours) in &rows {
         println!("{path:50} flowjo={flowjo:6} ours={ours:6} diff={:+}", *ours as i64 - *flowjo as i64);
     }

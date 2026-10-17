@@ -1,12 +1,20 @@
 // Typed bridge to the Tauri backend (docs/ipc.md). Falls back to an in-memory
 // mock (src/mock.ts) when not running inside Tauri.
 import type {
-  ChannelStats, CompMatrix, CompSource, GateAddResult, GateDim, GateShape, HistResult,
-  ImportResult, OpenResult, Plot2D, Plot2DHeader, PopulationStats, Tick, Transform,
-  TransformKind, WorkspaceView,
+  ChannelStats, CompMatrix, CompSource, GateAddResult, GateDim, GateScope, GateShape, Group,
+  GroupCreateResult, HistResult, ImportResult, OpenResult, Plot2D, Plot2DHeader, PopulationStats,
+  Tick, Transform, TransformKind, WorkspaceView,
 } from "./types";
 
 export type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
+
+// Scope used by the gate commands when the caller does not pass one. The app
+// state registers `currentScope()` here (see src/state.ts), so callers that
+// predate groups (e.g. the gating tools) follow the current group / sample.
+let defaultScope: () => GateScope | undefined = () => undefined;
+export function setDefaultScope(fn: () => GateScope | undefined): void {
+  defaultScope = fn;
+}
 
 export const isTauri: boolean =
   typeof window !== "undefined" &&
@@ -115,23 +123,35 @@ export const api = {
   sampleAdd: (paths: string[]) => call<OpenResult>("sample_add", { paths }),
   sampleRemove: (sampleId: string) => call<WorkspaceView>("sample_remove", { sampleId }),
   sampleKeywords: (sampleId: string) => call<Record<string, string>>("sample_keywords", { sampleId }),
-  channelSetTransform: (channel: string, transform: Transform) =>
-    call<WorkspaceView>("channel_set_transform", { channel, transform }),
+  /** Default transform, or that sample's override when `sampleId` is given. */
+  channelSetTransform: (channel: string, transform: Transform, sampleId: string | null = null) =>
+    call<WorkspaceView>("channel_set_transform", sampleId ? { channel, transform, sampleId } : { channel, transform }),
   channelDefaultTransform: (channel: string, kind: TransformKind, sampleId: string) =>
     call<Transform>("channel_default_transform", { channel, kind, sampleId }),
   compensationSet: (comp: CompSource) => call<WorkspaceView>("compensation_set", { comp }),
   compensationMatrix: (sampleId: string) => call<CompMatrix | null>("compensation_matrix", { sampleId }),
-  gateAdd: (name: string, parent: string | null, shape: GateShape, negate = false) =>
-    call<GateAddResult>("gate_add", { name, parent, shape, negate }),
+  gateAdd: (name: string, parent: string | null, shape: GateShape, negate = false, scope: GateScope | undefined = defaultScope()) =>
+    call<GateAddResult>("gate_add", { name, parent, shape, negate, scope }),
   gateUpdate: (
     gateId: string,
     patch: { shape?: GateShape; name?: string; negate?: boolean; color?: string | null },
-  ) => call<WorkspaceView>("gate_update", { gateId, ...patch }),
-  gateRemove: (gateId: string) => call<WorkspaceView>("gate_remove", { gateId }),
+    scope: GateScope | undefined = defaultScope(),
+  ) => call<WorkspaceView>("gate_update", { gateId, ...patch, scope }),
+  gateRemove: (gateId: string, scope: GateScope | undefined = defaultScope()) =>
+    call<WorkspaceView>("gate_remove", { gateId, scope }),
+  /** "Apply to group": push a sample's (tailored) gate to a group template and all members. */
+  gateCopyToGroup: (gateId: string, fromSampleId: string, groupId: string) =>
+    call<WorkspaceView>("gate_copy_to_group", { gateId, fromSampleId, groupId }),
+  groupList: () => call<Group[]>("group_list"),
+  groupCreate: (name: string, sampleIds: string[]) => call<GroupCreateResult>("group_create", { name, sampleIds }),
+  groupSetMembers: (groupId: string, sampleIds: string[]) =>
+    call<WorkspaceView>("group_set_members", { groupId, sampleIds }),
+  groupRemove: (groupId: string) => call<WorkspaceView>("group_remove", { groupId }),
   populationStats: (sampleId: string) => call<PopulationStats[]>("population_stats", { sampleId }),
   channelStats: (sampleId: string, gateId: string | null, channel: string, compensated: boolean) =>
     call<ChannelStats>("channel_stats", { sampleId, gateId, channel, compensated }),
-  axisTicks: (channel: string) => call<Tick[]>("axis_ticks", { channel }),
+  axisTicks: (channel: string, sampleId: string | null = null) =>
+    call<Tick[]>("axis_ticks", sampleId ? { channel, sampleId } : { channel }),
   plotHist: (sampleId: string, gateId: string | null, x: GateDim, bins: number) =>
     call<HistResult>("plot_hist", { sampleId, gateId, x, bins }),
   plot2d: async (

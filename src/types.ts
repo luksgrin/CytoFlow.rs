@@ -31,6 +31,7 @@ export type GateShape =
 export interface Gate {
   shape: GateShape;
   negate: boolean;
+  grid?: number | null;
 }
 
 export interface GateNode {
@@ -39,7 +40,26 @@ export interface GateNode {
   parent: string | null;
   gate: Gate;
   color: string | null;
+  /** Only on nodes of a sample's own tree (`sample_gates`). */
+  tailored?: boolean;
 }
+
+/** Node of a sample's own gate tree. */
+export type SampleGateNode = GateNode & { tailored: boolean };
+
+/** A sample group; `gates` is its template tree (default transform space). */
+export interface Group {
+  id: string;
+  name: string;
+  sample_ids: string[];
+  gates: GateNode[];
+}
+
+/** Where a gate edit applies. */
+export type GateScope = { group: string } | { sample: string };
+
+/** Id of the built-in group containing every sample. */
+export const ALL_SAMPLES = "all";
 
 export interface Parameter {
   name: string;
@@ -74,10 +94,22 @@ export interface WorkspaceView {
   name: string;
   samples: SampleInfo[];
   channel_settings: Record<string, { transform: Transform }>;
+  /** sample id → channel → per-sample transform override. */
+  sample_channel_settings: Record<string, Record<string, { transform: Transform }>>;
   compensation: CompSource;
+  /** groups[0] is always "All Samples" (id "all"). */
+  groups: Group[];
+  /** sample id → that sample's own gate tree. */
+  sample_gates: Record<string, SampleGateNode[]>;
+  /** The "All Samples" template (= groups[0].gates), kept for compatibility. */
   gates: GateNode[];
   loaded: string[];
   path: string | null;
+}
+
+export interface GroupCreateResult {
+  id: string;
+  workspace: WorkspaceView;
 }
 
 export interface PopulationStats {

@@ -32,6 +32,10 @@ type GateShape =
 
 type Gate = { shape: GateShape; negate: boolean; grid?: number | null }; // grid: optional display-grid rounding (set by the .wsp importer for FlowJo parity)
 type GateNode = { id: string; name: string; parent: string | null; gate: Gate; color: string | null };
+type SampleGateNode = GateNode & { tailored: boolean };          // node of a sample's own tree (see "Groups")
+
+type Group = { id: string; name: string; sample_ids: string[]; gates: GateNode[] };  // gates = template tree
+type GateScope = { group: string } | { sample: string };          // where a gate edit applies
 
 type Parameter = { name: string; stain: string | null; range: number; bits: number; amplification: [number, number]; gain: number };
 type SampleInfo = { id: string; name: string; path: string; event_count: number; channels: Parameter[]; keywords: Record<string, string> };
@@ -40,11 +44,14 @@ type CompMatrix = { channels: string[]; spillover: number[][] };  // row-major s
 type CompSource = { source: "none" } | { source: "fcs" } | { source: "custom"; matrix: CompMatrix };
 
 type WorkspaceView = {
-  version: number; name: string;
+  version: number; name: string;                                // version = 2
   samples: SampleInfo[];
-  channel_settings: Record<string, { transform: Transform }>;   // keyed by channel name
+  channel_settings: Record<string, { transform: Transform }>;   // default transform, keyed by channel name
+  sample_channel_settings: Record<string, Record<string, { transform: Transform }>>; // sample id → channel → override
   compensation: CompSource;
-  gates: GateNode[];                                            // flat list, tree via `parent`
+  groups: Group[];                                              // groups[0] is always { id: "all", name: "All Samples" }
+  sample_gates: Record<string, SampleGateNode[]>;               // sample id → that sample's own tree (flat, tree via `parent`)
+  gates: GateNode[];                                            // = groups[0].gates (the "All Samples" template), kept for compatibility
   loaded: string[];                                             // sample ids whose FCS data is in memory
   path: string | null;                                          // where the workspace was last saved/opened
 };
@@ -53,6 +60,38 @@ type PopulationStats = { gate_id: string | null; name: string; count: number; pa
 type ChannelStats    = { channel: string; mean: number; median: number; sd: number; cv: number; geo_mean: number | null; min: number; max: number };
 type Tick            = { pos: number; label: string; major: boolean };  // pos in display space
 ```
+
+## Groups and per-sample gate trees
+
+* Every sample owns its effective gate tree (`sample_gates[sampleId]`); all
+  per-sample commands (`population_stats`, `channel_stats`, `plot_*`,
+  `export_population_csv`) resolve `gateId` in **that sample's** tree.
+* A group's `gates` are a *template*. The same population has the same gate id
+  in the template and in every member's copy, so a gate id selected in one
+  sample can be plotted in another sample of the group.
+* `gate_add` with `{ group }` adds the gate to the template and copies it into
+  every member that has the parent population; with `{ sample }` it is added to
+  that sample only (marked `tailored`).
+* `gate_update` with `{ group }` updates the template; every member's copy gets
+  the new `name` / `color`, and the new `shape` / `negate` unless the copy is
+  `tailored`. With `{ sample }` only that sample's copy changes; a change of
+  shape, negation or name marks it `tailored: true`.
+* `gate_remove` with `{ group }` removes the gate and its descendants from the
+  template and from every member sample; with `{ sample }` from that sample only.
+* `gate_copy_to_group` ("Apply to group") pushes a sample's gate to a group: the
+  template takes it (inserted if new; its parent must be in the template), every
+  member's copy is reset to it (or inserted) and is no longer tailored.
+* Omitted `scope` = `{ group: "all" }` (the version-1 behaviour).
+* Transforms: `channel_settings` is the default; `sample_channel_settings`
+  holds per-sample overrides. Template coordinates are in the default space, a
+  sample's tree in that sample's effective space; copying between them re-maps
+  overridden channels. `channel_set_transform` without `sampleId` changes the
+  default (re-mapping the templates and the trees of samples without an
+  override on that channel); with `sampleId` it sets that sample's override and
+  re-maps only its tree (setting the default transform removes the override).
+* "All Samples" always contains every sample (new samples get a copy of its
+  template) and cannot be edited by `group_set_members` or removed. Adding a
+  sample to a group copies the template gates it lacks; removing it keeps them.
 
 ## Commands
 
@@ -66,16 +105,21 @@ type Tick            = { pos: number; label: string; major: boolean };  // pos i
 | `sample_add` | `{ paths: string[] }` | `{ workspace: WorkspaceView, errors: string[] }` |
 | `sample_remove` | `{ sampleId }` | `WorkspaceView` |
 | `sample_keywords` | `{ sampleId }` | `Record<string,string>` (full TEXT segment) |
-| `channel_set_transform` | `{ channel, transform: Transform }` | `WorkspaceView` (gate coords are re-mapped by the core) |
+| `channel_set_transform` | `{ channel, transform: Transform, sampleId?: string }` | `WorkspaceView` (default transform, or that sample's override; gate coords are re-mapped by the core) |
 | `channel_default_transform` | `{ channel, kind: "linear"\|"log"\|"asinh"\|"logicle"\|"biex", sampleId }` | `Transform` (defaults estimated from that sample's data) |
 | `compensation_set` | `{ comp: CompSource }` | `WorkspaceView` |
 | `compensation_matrix` | `{ sampleId }` | `CompMatrix \| null` (effective matrix for that sample) |
-| `gate_add` | `{ name, parent: string\|null, shape: GateShape, negate: boolean }` | `{ id: string, workspace: WorkspaceView }` |
-| `gate_update` | `{ gateId, shape?: GateShape, name?: string, negate?: boolean, color?: string\|null }` | `WorkspaceView` (omit `color` to keep it, `null` clears it) |
-| `gate_remove` | `{ gateId }` | `WorkspaceView` (descendants removed too) |
+| `group_list` | – | `Group[]` |
+| `group_create` | `{ name, sampleIds: string[] }` | `{ id: string, workspace: WorkspaceView }` |
+| `group_set_members` | `{ groupId, sampleIds: string[] }` | `WorkspaceView` (error for `"all"`) |
+| `group_remove` | `{ groupId }` | `WorkspaceView` (error for `"all"`; members keep their gates) |
+| `gate_add` | `{ name, parent: string\|null, shape: GateShape, negate: boolean, scope?: GateScope }` | `{ id: string, workspace: WorkspaceView }` (`parent` must exist in the scope's tree) |
+| `gate_update` | `{ gateId, shape?: GateShape, name?: string, negate?: boolean, color?: string\|null, scope?: GateScope }` | `WorkspaceView` (omit `color` to keep it, `null` clears it) |
+| `gate_remove` | `{ gateId, scope?: GateScope }` | `WorkspaceView` (descendants removed too) |
+| `gate_copy_to_group` | `{ gateId, fromSampleId, groupId }` | `WorkspaceView` |
 | `population_stats` | `{ sampleId }` | `PopulationStats[]` — root ("All events", gate_id null) first, then gates in pre-order |
 | `channel_stats` | `{ sampleId, gateId: string\|null, channel, compensated }` | `ChannelStats` |
-| `axis_ticks` | `{ channel }` | `Tick[]` |
+| `axis_ticks` | `{ channel, sampleId?: string }` | `Tick[]` (that sample's effective transform, else the default) |
 | `plot_hist` | `{ sampleId, gateId: string\|null, x: GateDim, bins }` | `{ bins, counts: number[], max_count, total, range: [lo, hi], ticks: Tick[], label: string }` |
 | `plot_2d` | `{ sampleId, gateId: string\|null, x: GateDim, y: GateDim, bins, maxPoints }` | **binary** (see below) |
 | `export_population_csv` | `{ sampleId, gateId: string\|null, path, channels: string[]\|null, compensated, transformed }` | `number` (rows written) |
@@ -111,6 +155,15 @@ paths to the commands above. The backend only needs `dialog:default` and the
 
 ## Workspace file format
 
-`*.cfw.json` — the `serde_json` of `Workspace` (samples, channel_settings,
-compensation, gates). Sample paths are stored absolute; on open the core also
+`*.cfw.json` — the `serde_json` of `Workspace`: version 2 stores `samples`,
+`channel_settings`, `sample_channel_settings`, `compensation`, `groups` and
+`sample_gates` (no top-level `gates`). Version-1 files (a single shared `gates`
+list) are still read: the list becomes the "All Samples" template and is copied
+into every sample. Sample paths are stored absolute; on open the core also
 looks for the file name next to the workspace file.
+
+`workspace_import_wsp` keeps each sample's own tree and transforms (as
+overrides of the defaults taken from the sample with the largest tree), gives
+the same population path the same gate id everywhere, and imports `<Groups>`
+with their `<SampleRefs>` and template `<Subpopulations>`. Samples whose FCS
+file is missing are still listed (not in `loaded`).

@@ -1,5 +1,22 @@
-//! The analysis workspace: samples, per-channel transforms, compensation and
-//! the shared gate hierarchy, plus cached evaluation of populations.
+//! The analysis workspace: samples, per-channel transforms, compensation,
+//! sample groups with template gate trees, the gate tree of every sample, and
+//! cached evaluation of populations.
+//!
+//! ## Groups and per-sample trees
+//!
+//! Every sample owns its effective gate tree (`sample_gates`). Groups
+//! (`groups`) hold *template* trees: adding a gate to a group copies it, with
+//! the same id, into every member sample; editing it through the group updates
+//! every member's copy that has not been tailored; removing it removes the
+//! copies (and their descendants). Editing a gate on a single sample only
+//! changes that sample's copy and marks it `tailored`. The built-in group
+//! [`ALL_SAMPLES`] always exists and contains every sample.
+//!
+//! Gate coordinates are in display space. Group templates use the workspace
+//! default transforms (`channel_settings`); a sample's tree uses that
+//! sample's effective transforms (its overrides in `sample_channel_settings`,
+//! falling back to the defaults). Copying a gate between a group and a sample
+//! re-maps the coordinates of overridden channels.
 
 use crate::compensation::CompMatrix;
 use crate::error::{Error, Result};
@@ -9,8 +26,16 @@ use crate::stats::{channel_stats, ChannelStats};
 use crate::transform::{Transform, TransformKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// Current workspace file format version.
+pub const WORKSPACE_VERSION: u32 = 2;
+/// Id of the built-in group that contains every sample.
+pub const ALL_SAMPLES: &str = "all";
+/// Display name of the built-in group.
+pub const ALL_SAMPLES_NAME: &str = "All Samples";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChannelSetting {
@@ -43,16 +68,96 @@ pub enum CompSource {
     Custom { matrix: CompMatrix },
 }
 
+/// A sample group with its template gate tree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Group {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub sample_ids: Vec<String>,
+    /// Template gates, in the workspace default transform space.
+    #[serde(default)]
+    pub gates: Vec<GateNode>,
+}
+
+/// A node of a sample's own gate tree: a [`GateNode`] plus whether it was
+/// tailored, i.e. deviates from (or is absent from) the templates of the
+/// sample's groups. Serialises as a `GateNode` with an extra `tailored` field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SampleGate {
+    #[serde(flatten)]
+    pub node: GateNode,
+    #[serde(default)]
+    pub tailored: bool,
+}
+
+impl SampleGate {
+    pub fn new(node: GateNode, tailored: bool) -> Self {
+        SampleGate { node, tailored }
+    }
+}
+
+impl Deref for SampleGate {
+    type Target = GateNode;
+    fn deref(&self) -> &GateNode {
+        &self.node
+    }
+}
+
+impl DerefMut for SampleGate {
+    fn deref_mut(&mut self) -> &mut GateNode {
+        &mut self.node
+    }
+}
+
+impl AsRef<GateNode> for SampleGate {
+    fn as_ref(&self) -> &GateNode {
+        &self.node
+    }
+}
+
+impl AsRef<GateNode> for GateNode {
+    fn as_ref(&self) -> &GateNode {
+        self
+    }
+}
+
+/// Where a gate edit applies: a group template (and its members' copies), or a
+/// single sample's tree. JSON: `{ "group": id }` or `{ "sample": id }`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GateScope {
+    Group(String),
+    Sample(String),
+}
+
+impl Default for GateScope {
+    fn default() -> Self {
+        GateScope::Group(ALL_SAMPLES.into())
+    }
+}
+
 /// Serialisable workspace document.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Workspace {
     pub version: u32,
     pub name: String,
     pub samples: Vec<SampleInfo>,
-    /// Transform per channel name (shared by its compensated variant).
+    /// Default transform per channel name (shared by its compensated variant).
     pub channel_settings: BTreeMap<String, ChannelSetting>,
+    /// Per-sample transform overrides: sample id → channel → setting.
+    #[serde(default)]
+    pub sample_channel_settings: BTreeMap<String, BTreeMap<String, ChannelSetting>>,
     pub compensation: CompSource,
-    pub gates: Vec<GateNode>,
+    /// Sample groups; the first is always [`ALL_SAMPLES`].
+    #[serde(default)]
+    pub groups: Vec<Group>,
+    /// The effective gate tree of each sample (flat list, tree via `parent`).
+    #[serde(default)]
+    pub sample_gates: BTreeMap<String, Vec<SampleGate>>,
+    /// Version-1 shared gate list; migrated into the "All Samples" group on load.
+    #[serde(default, rename = "gates", skip_serializing)]
+    legacy_gates: Vec<GateNode>,
     #[serde(skip)]
     loaded: HashMap<String, LoadedSample>,
     #[serde(skip)]
@@ -62,12 +167,15 @@ pub struct Workspace {
 impl Default for Workspace {
     fn default() -> Self {
         Workspace {
-            version: 1,
+            version: WORKSPACE_VERSION,
             name: "Untitled".into(),
             samples: Vec::new(),
             channel_settings: BTreeMap::new(),
+            sample_channel_settings: BTreeMap::new(),
             compensation: CompSource::None,
-            gates: Vec::new(),
+            groups: vec![Group { id: ALL_SAMPLES.into(), name: ALL_SAMPLES_NAME.into(), sample_ids: Vec::new(), gates: Vec::new() }],
+            sample_gates: BTreeMap::new(),
+            legacy_gates: Vec::new(),
             loaded: HashMap::new(),
             next_id: 1,
         }
@@ -109,24 +217,120 @@ fn is_scatter_or_time(name: &str) -> bool {
     u.starts_with("FSC") || u.starts_with("SSC") || u == "TIME" || u.starts_with("TIME") || u.starts_with("EVENT")
 }
 
+/// Ids of `id` and all of its descendants in a flat tree.
+fn subtree<T: AsRef<GateNode>>(nodes: &[T], id: &str) -> HashSet<String> {
+    let mut doomed: HashSet<String> = HashSet::from([id.to_string()]);
+    loop {
+        let before = doomed.len();
+        for g in nodes {
+            let g = g.as_ref();
+            if g.parent.as_ref().is_some_and(|p| doomed.contains(p)) {
+                doomed.insert(g.id.clone());
+            }
+        }
+        if doomed.len() == before {
+            return doomed;
+        }
+    }
+}
+
+/// Gate ids of a flat tree in depth-first pre-order.
+fn preorder_of<T: AsRef<GateNode>>(nodes: &[T]) -> Vec<String> {
+    fn walk<T: AsRef<GateNode>>(nodes: &[T], parent: Option<&str>, out: &mut Vec<String>) {
+        for g in nodes.iter().map(AsRef::as_ref).filter(|g| g.parent.as_deref() == parent) {
+            out.push(g.id.clone());
+            walk(nodes, Some(&g.id), out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(nodes, None, &mut out);
+    out
+}
+
+fn path_of<T: AsRef<GateNode>>(nodes: &[T], id: &str) -> String {
+    let mut parts = Vec::new();
+    let mut cur = Some(id.to_string());
+    while let Some(c) = cur {
+        match nodes.iter().map(AsRef::as_ref).find(|g| g.id == c) {
+            Some(g) => {
+                parts.push(g.name.clone());
+                cur = g.parent.clone();
+            }
+            None => break,
+        }
+    }
+    parts.reverse();
+    parts.join("/")
+}
+
 impl Workspace {
     pub fn new(name: &str) -> Self {
         Workspace { name: name.to_string(), ..Default::default() }
     }
 
-    // ---------------------------------------------------------------- samples
+    // ---------------------------------------------------------------- ids
+
+    fn id_in_use(&self, id: &str) -> bool {
+        self.samples.iter().any(|s| s.id == id)
+            || self.groups.iter().any(|g| g.id == id || g.gates.iter().any(|n| n.id == id))
+            || self.sample_gates.values().any(|t| t.iter().any(|n| n.id == id))
+    }
 
     fn fresh_id(&mut self, prefix: &str) -> String {
         loop {
             let id = format!("{prefix}{}", self.next_id);
             self.next_id += 1;
-            if !self.samples.iter().any(|s| s.id == id) && !self.gates.iter().any(|g| g.id == id) {
+            if !self.id_in_use(&id) {
                 return id;
             }
         }
     }
 
-    /// Load an FCS file and add it as a sample. Returns the sample id.
+    /// Bring a deserialised (possibly version-1) workspace to the current
+    /// model: the "All Samples" group exists first and contains every sample,
+    /// groups only list existing samples, every sample has a gate tree.
+    fn normalize(&mut self) {
+        let legacy = std::mem::take(&mut self.legacy_gates);
+        match self.groups.iter().position(|g| g.id == ALL_SAMPLES) {
+            Some(0) => {}
+            Some(i) => {
+                let g = self.groups.remove(i);
+                self.groups.insert(0, g);
+            }
+            None => self.groups.insert(0, Group { id: ALL_SAMPLES.into(), name: ALL_SAMPLES_NAME.into(), sample_ids: Vec::new(), gates: legacy }),
+        }
+        let ids: Vec<String> = self.samples.iter().map(|s| s.id.clone()).collect();
+        self.groups[0].sample_ids = ids.clone();
+        for g in self.groups.iter_mut().skip(1) {
+            g.sample_ids.retain(|s| ids.contains(s));
+        }
+        self.sample_gates.retain(|k, _| ids.contains(k));
+        self.sample_channel_settings.retain(|k, _| ids.contains(k));
+        for sid in &ids {
+            if !self.sample_gates.contains_key(sid) {
+                let tree = self.groups[0].gates.iter().map(|n| SampleGate::new(self.template_to_sample(sid, n), false)).collect();
+                self.sample_gates.insert(sid.clone(), tree);
+            }
+        }
+        self.version = WORKSPACE_VERSION;
+    }
+
+    // ---------------------------------------------------------------- samples
+
+    fn register_sample(&mut self, info: SampleInfo) -> String {
+        let id = info.id.clone();
+        self.samples.push(info);
+        if self.groups.first().is_none_or(|g| g.id != ALL_SAMPLES) {
+            self.normalize();
+        }
+        self.groups[0].sample_ids.push(id.clone());
+        let tree = self.groups[0].gates.iter().map(|n| SampleGate::new(self.template_to_sample(&id, n), false)).collect();
+        self.sample_gates.insert(id.clone(), tree);
+        id
+    }
+
+    /// Load an FCS file and add it as a sample (member of "All Samples", with
+    /// a copy of that group's gates). Returns the sample id.
     pub fn add_sample<P: AsRef<Path>>(&mut self, path: P) -> Result<String> {
         let path = path.as_ref().to_path_buf();
         let fcs = FcsFile::open(&path)?;
@@ -143,9 +347,15 @@ impl Workspace {
         if matches!(self.compensation, CompSource::None) && fcs.spillover.as_ref().is_some_and(|s| !s.matrix.is_empty()) {
             self.compensation = CompSource::Fcs;
         }
-        self.samples.push(info);
         self.loaded.insert(id.clone(), LoadedSample::new(fcs));
-        Ok(id)
+        Ok(self.register_sample(info))
+    }
+
+    /// Add a sample whose FCS file is not available (it is listed, keeps its
+    /// gate tree and can be re-attached by [`Workspace::reload_samples`]).
+    pub fn add_unloaded_sample(&mut self, name: &str, path: &Path) -> String {
+        let id = self.fresh_id("s");
+        self.register_sample(SampleInfo { id, name: name.to_string(), path: path.to_path_buf(), event_count: 0, channels: Vec::new(), keywords: BTreeMap::new() })
     }
 
     /// Re-open the FCS files listed in a deserialised workspace. Missing files
@@ -175,11 +385,6 @@ impl Workspace {
                 Err(e) => errors.push((id, e)),
             }
         }
-        let max_id = self.samples.iter().chain_ids().chain(self.gates.iter().map(|g| g.id.as_str()))
-            .filter_map(|id| id.trim_start_matches(|c: char| c.is_alphabetic()).parse::<u64>().ok())
-            .max()
-            .unwrap_or(0);
-        self.next_id = self.next_id.max(max_id + 1);
         errors
     }
 
@@ -187,6 +392,11 @@ impl Workspace {
         let idx = self.samples.iter().position(|s| s.id == id).ok_or_else(|| Error::SampleNotFound(id.into()))?;
         self.samples.remove(idx);
         self.loaded.remove(id);
+        self.sample_gates.remove(id);
+        self.sample_channel_settings.remove(id);
+        for g in self.groups.iter_mut() {
+            g.sample_ids.retain(|s| s != id);
+        }
         Ok(())
     }
 
@@ -210,27 +420,181 @@ impl Workspace {
         }
     }
 
+    // ---------------------------------------------------------------- groups
+
+    pub fn group(&self, group_id: &str) -> Result<&Group> {
+        self.groups.iter().find(|g| g.id == group_id).ok_or_else(|| Error::Workspace(format!("group not found: {group_id}")))
+    }
+
+    fn group_index(&self, group_id: &str) -> Result<usize> {
+        self.groups.iter().position(|g| g.id == group_id).ok_or_else(|| Error::Workspace(format!("group not found: {group_id}")))
+    }
+
+    fn check_samples(&self, sample_ids: &[String]) -> Result<Vec<String>> {
+        let mut out: Vec<String> = Vec::new();
+        for s in sample_ids {
+            if !self.samples.iter().any(|x| &x.id == s) {
+                return Err(Error::SampleNotFound(s.clone()));
+            }
+            if !out.contains(s) {
+                out.push(s.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Create a group (with an empty template). Returns its id.
+    pub fn create_group(&mut self, name: &str, sample_ids: &[String]) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Workspace("group name must not be empty".into()));
+        }
+        let members = self.check_samples(sample_ids)?;
+        let id = self.fresh_id("grp");
+        self.groups.push(Group { id: id.clone(), name: name.to_string(), sample_ids: members, gates: Vec::new() });
+        Ok(id)
+    }
+
+    /// Replace the members of a group. New members receive copies of the
+    /// template gates they do not have yet; removed members keep their gates.
+    pub fn set_group_members(&mut self, group_id: &str, sample_ids: &[String]) -> Result<()> {
+        if group_id == ALL_SAMPLES {
+            return Err(Error::Workspace("the All Samples group always contains every sample".into()));
+        }
+        let gi = self.group_index(group_id)?;
+        let members = self.check_samples(sample_ids)?;
+        let added: Vec<String> = members.iter().filter(|s| !self.groups[gi].sample_ids.contains(s)).cloned().collect();
+        self.groups[gi].sample_ids = members;
+        let template = self.groups[gi].gates.clone();
+        for sid in &added {
+            for id in preorder_of(&template) {
+                let node = template.iter().find(|n| n.id == id).unwrap();
+                self.insert_template_copy(sid, node);
+            }
+            self.invalidate_sample(sid);
+        }
+        Ok(())
+    }
+
+    /// Delete a group (its members keep their gates).
+    pub fn remove_group(&mut self, group_id: &str) -> Result<()> {
+        if group_id == ALL_SAMPLES {
+            return Err(Error::Workspace("the All Samples group cannot be removed".into()));
+        }
+        let gi = self.group_index(group_id)?;
+        self.groups.remove(gi);
+        Ok(())
+    }
+
     // ------------------------------------------------------------- transforms
 
-    pub fn transform_for(&self, channel: &str) -> Transform {
+    /// The workspace default transform of a channel.
+    pub fn default_transform(&self, channel: &str) -> Transform {
         self.channel_settings.get(channel).map(|c| c.transform.clone()).unwrap_or_default()
     }
 
-    /// Change a channel's transform, re-mapping gate coordinates so that gates
-    /// keep the same raw-data meaning.
+    /// The effective transform of a channel for a sample: its override if any,
+    /// else the workspace default.
+    pub fn transform_for(&self, sample_id: &str, channel: &str) -> Transform {
+        self.sample_channel_settings
+            .get(sample_id)
+            .and_then(|m| m.get(channel))
+            .map(|c| c.transform.clone())
+            .unwrap_or_else(|| self.default_transform(channel))
+    }
+
+    fn has_override(&self, sample_id: &str, channel: &str) -> bool {
+        self.sample_channel_settings.get(sample_id).is_some_and(|m| m.contains_key(channel))
+    }
+
+    /// Change a channel's default transform, re-mapping the coordinates of the
+    /// group templates and of every sample tree that uses the default on that
+    /// channel (samples with an override keep theirs), so that gates keep the
+    /// same raw-data meaning.
     pub fn set_transform(&mut self, channel: &str, transform: Transform) {
-        let old = self.transform_for(channel);
+        let old = self.default_transform(channel);
         if old == transform {
             return;
         }
-        for g in self.gates.iter_mut() {
-            remap_gate(&mut g.gate.shape, channel, &old, &transform);
+        for g in self.groups.iter_mut() {
+            for n in g.gates.iter_mut() {
+                remap_gate(&mut n.gate.shape, channel, &old, &transform);
+            }
+        }
+        let followers: Vec<String> = self.samples.iter().filter(|s| !self.has_override(&s.id, channel)).map(|s| s.id.clone()).collect();
+        for sid in &followers {
+            if let Some(tree) = self.sample_gates.get_mut(sid) {
+                for n in tree.iter_mut() {
+                    remap_gate(&mut n.node.gate.shape, channel, &old, &transform);
+                }
+            }
+            if let Some(l) = self.loaded.get_mut(sid) {
+                l.transformed.retain(|(c, _), _| c != channel);
+                l.membership.clear();
+            }
         }
         self.channel_settings.insert(channel.to_string(), ChannelSetting { transform });
-        for l in self.loaded.values_mut() {
+    }
+
+    /// Override a channel's transform for one sample, re-mapping only that
+    /// sample's gates. Setting the default transform removes the override.
+    pub fn set_sample_transform(&mut self, sample_id: &str, channel: &str, transform: Transform) -> Result<()> {
+        if !self.samples.iter().any(|s| s.id == sample_id) {
+            return Err(Error::SampleNotFound(sample_id.into()));
+        }
+        let old = self.transform_for(sample_id, channel);
+        if transform == self.default_transform(channel) {
+            if let Some(m) = self.sample_channel_settings.get_mut(sample_id) {
+                m.remove(channel);
+                if m.is_empty() {
+                    self.sample_channel_settings.remove(sample_id);
+                }
+            }
+        } else {
+            self.sample_channel_settings
+                .entry(sample_id.to_string())
+                .or_default()
+                .insert(channel.to_string(), ChannelSetting { transform: transform.clone() });
+        }
+        if old == transform {
+            return Ok(());
+        }
+        if let Some(tree) = self.sample_gates.get_mut(sample_id) {
+            for n in tree.iter_mut() {
+                remap_gate(&mut n.node.gate.shape, channel, &old, &transform);
+            }
+        }
+        if let Some(l) = self.loaded.get_mut(sample_id) {
             l.transformed.retain(|(c, _), _| c != channel);
             l.membership.clear();
         }
+        Ok(())
+    }
+
+    /// Re-express a shape from the default transform space in the sample's space.
+    fn shape_to_sample(&self, sample_id: &str, shape: &mut GateShape) {
+        let channels: Vec<String> = shape.dims().iter().map(|d| d.channel.clone()).collect();
+        for ch in dedup(channels) {
+            if self.has_override(sample_id, &ch) {
+                remap_gate(shape, &ch, &self.default_transform(&ch), &self.transform_for(sample_id, &ch));
+            }
+        }
+    }
+
+    /// Re-express a shape from the sample's transform space in the default space.
+    fn shape_to_default(&self, sample_id: &str, shape: &mut GateShape) {
+        let channels: Vec<String> = shape.dims().iter().map(|d| d.channel.clone()).collect();
+        for ch in dedup(channels) {
+            if self.has_override(sample_id, &ch) {
+                remap_gate(shape, &ch, &self.transform_for(sample_id, &ch), &self.default_transform(&ch));
+            }
+        }
+    }
+
+    fn template_to_sample(&self, sample_id: &str, node: &GateNode) -> GateNode {
+        let mut n = node.clone();
+        self.shape_to_sample(sample_id, &mut n.gate.shape);
+        n
     }
 
     pub fn set_compensation(&mut self, comp: CompSource) {
@@ -268,7 +632,7 @@ impl Workspace {
         }
     }
 
-    /// Transformed (display-space) column, cached.
+    /// Transformed (display-space) column with the sample's effective transform, cached.
     pub fn transformed(&mut self, sample_id: &str, channel: &str, compensated: bool) -> Result<Arc<Vec<f32>>> {
         let key = (channel.to_string(), compensated);
         if let Some(l) = self.loaded.get(sample_id) {
@@ -277,7 +641,7 @@ impl Workspace {
             }
         }
         let raw = self.column(sample_id, channel, compensated)?;
-        let t = self.transform_for(channel);
+        let t = self.transform_for(sample_id, channel);
         let mut out = Vec::new();
         t.apply_slice(&raw, &mut out);
         let arc = Arc::new(out);
@@ -287,99 +651,255 @@ impl Workspace {
 
     // ----------------------------------------------------------------- gates
 
-    pub fn gate(&self, id: &str) -> Result<&GateNode> {
-        self.gates.iter().find(|g| g.id == id).ok_or_else(|| Error::GateNotFound(id.into()))
+    /// The gate tree of a sample.
+    pub fn sample_tree(&self, sample_id: &str) -> Result<&[SampleGate]> {
+        self.sample_gates.get(sample_id).map(|v| v.as_slice()).ok_or_else(|| Error::SampleNotFound(sample_id.into()))
     }
 
-    pub fn children_of(&self, parent: Option<&str>) -> Vec<&GateNode> {
-        self.gates.iter().filter(|g| g.parent.as_deref() == parent).collect()
+    /// The template tree of the "All Samples" group (the version-1 `gates`).
+    pub fn gates(&self) -> &[GateNode] {
+        self.groups.first().map(|g| g.gates.as_slice()).unwrap_or(&[])
     }
 
-    /// Add a gate; returns its id.
+    /// A gate of a sample's tree.
+    pub fn gate(&self, sample_id: &str, id: &str) -> Result<&GateNode> {
+        self.sample_tree(sample_id)?.iter().find(|g| g.id == id).map(|g| &g.node).ok_or_else(|| Error::GateNotFound(id.into()))
+    }
+
+    /// A node of a sample's tree, with its `tailored` flag.
+    pub fn sample_gate(&self, sample_id: &str, id: &str) -> Result<&SampleGate> {
+        self.sample_tree(sample_id)?.iter().find(|g| g.id == id).ok_or_else(|| Error::GateNotFound(id.into()))
+    }
+
+    /// A template gate of a group.
+    pub fn group_gate(&self, group_id: &str, id: &str) -> Result<&GateNode> {
+        self.group(group_id)?.gates.iter().find(|g| g.id == id).ok_or_else(|| Error::GateNotFound(id.into()))
+    }
+
+    pub fn children_of(&self, sample_id: &str, parent: Option<&str>) -> Vec<&GateNode> {
+        self.sample_gates.get(sample_id).map(|t| t.iter().map(|g| &g.node).filter(|g| g.parent.as_deref() == parent).collect()).unwrap_or_default()
+    }
+
+    /// Add a gate to the "All Samples" group (and so to every sample); returns its id.
     pub fn add_gate(&mut self, name: &str, parent: Option<&str>, shape: GateShape, negate: bool) -> Result<String> {
-        if let Some(p) = parent {
-            self.gate(p)?;
-        }
-        validate_shape(&shape)?;
-        let id = self.fresh_id("g");
-        self.gates.push(GateNode { id: id.clone(), name: name.to_string(), parent: parent.map(String::from), gate: crate::gate::Gate { shape, negate, grid: None }, color: None });
-        self.invalidate_memberships();
-        Ok(id)
+        self.add_gate_in(&GateScope::default(), name, parent, shape, negate)
     }
 
+    /// Add a gate to a group template (copied into every member sample that
+    /// has the parent population) or to a single sample (tailored). The shape
+    /// is in the scope's transform space. Returns the new gate id.
+    pub fn add_gate_in(&mut self, scope: &GateScope, name: &str, parent: Option<&str>, shape: GateShape, negate: bool) -> Result<String> {
+        validate_shape(&shape)?;
+        match scope {
+            GateScope::Group(gid) => {
+                let gi = self.group_index(gid)?;
+                if let Some(p) = parent {
+                    self.group_gate(gid, p)?;
+                }
+                let id = self.fresh_id("g");
+                let node = GateNode { id: id.clone(), name: name.to_string(), parent: parent.map(String::from), gate: crate::gate::Gate { shape, negate, grid: None }, color: None };
+                self.groups[gi].gates.push(node.clone());
+                for sid in self.groups[gi].sample_ids.clone() {
+                    self.insert_template_copy(&sid, &node);
+                    self.invalidate_sample(&sid);
+                }
+                Ok(id)
+            }
+            GateScope::Sample(sid) => {
+                self.sample_tree(sid)?;
+                if let Some(p) = parent {
+                    self.gate(sid, p)?;
+                }
+                let id = self.fresh_id("g");
+                let node = GateNode { id: id.clone(), name: name.to_string(), parent: parent.map(String::from), gate: crate::gate::Gate { shape, negate, grid: None }, color: None };
+                self.sample_gates.get_mut(sid).unwrap().push(SampleGate::new(node, true));
+                self.invalidate_sample(sid);
+                Ok(id)
+            }
+        }
+    }
+
+    /// Copy a template node into a sample (unless it already has that id or
+    /// lacks the parent population).
+    fn insert_template_copy(&mut self, sample_id: &str, node: &GateNode) {
+        let copy = self.template_to_sample(sample_id, node);
+        let Some(tree) = self.sample_gates.get_mut(sample_id) else { return };
+        if tree.iter().any(|n| n.id == node.id) {
+            return;
+        }
+        if let Some(p) = &node.parent {
+            if !tree.iter().any(|n| &n.id == p) {
+                return;
+            }
+        }
+        tree.push(SampleGate::new(copy, false));
+    }
+
+    /// Update a gate of the "All Samples" group.
     /// `color`: `None` leaves the colour unchanged, `Some(None)` clears it.
     pub fn update_gate(&mut self, id: &str, shape: Option<GateShape>, name: Option<&str>, negate: Option<bool>, color: Option<Option<String>>) -> Result<()> {
-        let g = self.gates.iter_mut().find(|g| g.id == id).ok_or_else(|| Error::GateNotFound(id.into()))?;
-        if let Some(c) = color {
-            g.color = c;
+        self.update_gate_in(&GateScope::default(), id, shape, name, negate, color)
+    }
+
+    /// Update a gate through a group or on one sample.
+    ///
+    /// * Group scope: the template is updated; every member sample's copy
+    ///   gets the new name and colour, and the new shape / negation unless the
+    ///   copy is tailored.
+    /// * Sample scope: only that sample's copy changes; a change of shape,
+    ///   negation or name marks it tailored.
+    pub fn update_gate_in(&mut self, scope: &GateScope, id: &str, shape: Option<GateShape>, name: Option<&str>, negate: Option<bool>, color: Option<Option<String>>) -> Result<()> {
+        if let Some(s) = &shape {
+            validate_shape(s)?;
         }
-        if let Some(s) = shape {
-            validate_shape(&s)?;
-            g.gate.shape = s;
+        match scope {
+            GateScope::Group(gid) => {
+                let gi = self.group_index(gid)?;
+                let g = self.groups[gi].gates.iter_mut().find(|g| g.id == id).ok_or_else(|| Error::GateNotFound(id.into()))?;
+                apply_patch(g, shape.clone(), name, negate, color.clone());
+                for sid in self.groups[gi].sample_ids.clone() {
+                    let mut s = shape.clone();
+                    if let Some(sh) = s.as_mut() {
+                        self.shape_to_sample(&sid, sh);
+                    }
+                    let Some(n) = self.sample_gates.get_mut(&sid).and_then(|t| t.iter_mut().find(|n| n.id == id)) else { continue };
+                    if n.tailored {
+                        apply_patch(&mut n.node, None, name, None, color.clone());
+                    } else {
+                        apply_patch(&mut n.node, s, name, negate, color.clone());
+                    }
+                    self.invalidate_sample(&sid);
+                }
+            }
+            GateScope::Sample(sid) => {
+                let tree = self.sample_gates.get_mut(sid).ok_or_else(|| Error::SampleNotFound(sid.clone()))?;
+                let n = tree.iter_mut().find(|n| n.id == id).ok_or_else(|| Error::GateNotFound(id.into()))?;
+                if shape.is_some() || negate.is_some_and(|v| v != n.gate.negate) || name.is_some_and(|v| v != n.name) {
+                    n.tailored = true;
+                }
+                apply_patch(&mut n.node, shape, name, negate, color);
+                self.invalidate_sample(sid);
+            }
         }
-        if let Some(n) = name {
-            g.name = n.to_string();
-        }
-        if let Some(n) = negate {
-            g.gate.negate = n;
-        }
-        self.invalidate_memberships();
         Ok(())
     }
 
-    /// Remove a gate and all of its descendants. Returns removed ids.
+    /// Remove a gate of the "All Samples" group from the template and from
+    /// every sample, with all descendants. Returns removed ids.
     pub fn remove_gate(&mut self, id: &str) -> Result<Vec<String>> {
-        self.gate(id)?;
-        let mut doomed: HashSet<String> = HashSet::from([id.to_string()]);
-        loop {
-            let before = doomed.len();
-            for g in &self.gates {
-                if let Some(p) = &g.parent {
-                    if doomed.contains(p) {
-                        doomed.insert(g.id.clone());
+        self.remove_gate_in(&GateScope::default(), id)
+    }
+
+    /// Remove a gate (and its descendants) from a group template and all of
+    /// its member samples, or from one sample only. Returns the removed ids.
+    pub fn remove_gate_in(&mut self, scope: &GateScope, id: &str) -> Result<Vec<String>> {
+        let mut removed: HashSet<String> = HashSet::new();
+        match scope {
+            GateScope::Group(gid) => {
+                let gi = self.group_index(gid)?;
+                self.group_gate(gid, id)?;
+                let doomed = subtree(&self.groups[gi].gates, id);
+                self.groups[gi].gates.retain(|g| !doomed.contains(&g.id));
+                removed.extend(doomed);
+                for sid in self.groups[gi].sample_ids.clone() {
+                    if let Some(tree) = self.sample_gates.get_mut(&sid) {
+                        if tree.iter().any(|n| n.id == id) {
+                            let doomed = subtree(tree, id);
+                            tree.retain(|g| !doomed.contains(&g.id));
+                            removed.extend(doomed);
+                        }
+                    }
+                    self.invalidate_sample(&sid);
+                }
+            }
+            GateScope::Sample(sid) => {
+                self.gate(sid, id)?;
+                let tree = self.sample_gates.get_mut(sid).unwrap();
+                let doomed = subtree(tree, id);
+                tree.retain(|g| !doomed.contains(&g.id));
+                removed.extend(doomed);
+                self.invalidate_sample(sid);
+            }
+        }
+        Ok(removed.into_iter().collect())
+    }
+
+    /// Push a sample's (tailored) gate to a group: the template takes the
+    /// sample's gate (re-expressed in the default transform space) and every
+    /// member's copy is reset to it (no longer tailored). If the group does not
+    /// have the gate yet, it is inserted (its parent must be in the template).
+    pub fn copy_gate_to_group(&mut self, gate_id: &str, from_sample: &str, group_id: &str) -> Result<()> {
+        let gi = self.group_index(group_id)?;
+        let mut node = self.gate(from_sample, gate_id)?.clone();
+        self.shape_to_default(from_sample, &mut node.gate.shape);
+        {
+            let tmpl = &mut self.groups[gi].gates;
+            match tmpl.iter_mut().find(|g| g.id == gate_id) {
+                Some(t) => {
+                    t.name = node.name.clone();
+                    t.gate = node.gate.clone();
+                    t.color = node.color.clone();
+                }
+                None => {
+                    if let Some(p) = &node.parent {
+                        if !tmpl.iter().any(|g| &g.id == p) {
+                            return Err(Error::InvalidGate(format!("the parent population of {} is not in group {}", node.name, self.groups[gi].name)));
+                        }
+                    }
+                    tmpl.push(node.clone());
+                }
+            }
+        }
+        let mut members = self.groups[gi].sample_ids.clone();
+        if !members.iter().any(|s| s == from_sample) {
+            members.push(from_sample.to_string());
+        }
+        for sid in members {
+            let copy = self.template_to_sample(&sid, &node);
+            let Some(tree) = self.sample_gates.get_mut(&sid) else { continue };
+            match tree.iter_mut().find(|n| n.id == gate_id) {
+                Some(n) => {
+                    n.node.name = copy.name;
+                    n.node.gate = copy.gate;
+                    n.node.color = copy.color;
+                    n.tailored = false;
+                }
+                None => {
+                    if copy.parent.as_ref().is_none_or(|p| tree.iter().any(|n| &n.id == p)) {
+                        tree.push(SampleGate::new(copy, false));
                     }
                 }
             }
-            if doomed.len() == before {
-                break;
-            }
+            self.invalidate_sample(&sid);
         }
-        self.gates.retain(|g| !doomed.contains(&g.id));
-        self.invalidate_memberships();
-        Ok(doomed.into_iter().collect())
+        Ok(())
     }
 
-    fn invalidate_memberships(&mut self) {
-        for l in self.loaded.values_mut() {
+    fn invalidate_sample(&mut self, sample_id: &str) {
+        if let Some(l) = self.loaded.get_mut(sample_id) {
             l.membership.clear();
         }
     }
 
-    /// Path of names from the root to this gate, joined by `/`.
-    pub fn gate_path(&self, id: &str) -> String {
-        let mut parts = Vec::new();
-        let mut cur = Some(id.to_string());
-        while let Some(c) = cur {
-            match self.gates.iter().find(|g| g.id == c) {
-                Some(g) => {
-                    parts.push(g.name.clone());
-                    cur = g.parent.clone();
-                }
-                None => break,
-            }
-        }
-        parts.reverse();
-        parts.join("/")
+    /// Path of names from the root to a gate of a sample's tree, joined by `/`.
+    pub fn gate_path(&self, sample_id: &str, id: &str) -> String {
+        self.sample_gates.get(sample_id).map(|t| path_of(t, id)).unwrap_or_default()
     }
 
-    /// Boolean membership vector for a population (gate id), including parents.
+    /// Path of names from the root to a template gate of a group.
+    pub fn group_gate_path(&self, group_id: &str, id: &str) -> String {
+        self.group(group_id).map(|g| path_of(&g.gates, id)).unwrap_or_default()
+    }
+
+    /// Boolean membership vector for a population (gate id of the sample's
+    /// tree), including parents.
     pub fn membership(&mut self, sample_id: &str, gate_id: &str) -> Result<Arc<Vec<bool>>> {
         if let Some(l) = self.loaded.get(sample_id) {
             if let Some(m) = l.membership.get(gate_id) {
                 return Ok(m.clone());
             }
         }
-        let node = self.gate(gate_id)?.clone();
+        let node = self.gate(sample_id, gate_id)?.clone();
         let n = self.fcs(sample_id)?.event_count;
         let mut own = vec![false; n];
         match &node.gate.shape {
@@ -451,7 +971,7 @@ impl Workspace {
         let (name, parent) = match gate_id {
             None => ("All events".to_string(), None),
             Some(g) => {
-                let node = self.gate(g)?;
+                let node = self.gate(sample_id, g)?;
                 (node.name.clone(), node.parent.clone())
             }
         };
@@ -468,27 +988,23 @@ impl Workspace {
         })
     }
 
-    /// Stats for every population in the tree (pre-order), for one sample.
+    /// Stats for every population of the sample's tree (pre-order).
     pub fn all_population_stats(&mut self, sample_id: &str) -> Result<Vec<PopulationStats>> {
         let mut out = vec![self.population_stats(sample_id, None)?];
-        let order = self.preorder();
-        for id in order {
+        for id in self.preorder(sample_id) {
             out.push(self.population_stats(sample_id, Some(&id))?);
         }
         Ok(out)
     }
 
-    /// Gate ids in depth-first pre-order.
-    pub fn preorder(&self) -> Vec<String> {
-        fn walk(ws: &Workspace, parent: Option<&str>, out: &mut Vec<String>) {
-            for g in ws.children_of(parent) {
-                out.push(g.id.clone());
-                walk(ws, Some(&g.id), out);
-            }
-        }
-        let mut out = Vec::new();
-        walk(self, None, &mut out);
-        out
+    /// Gate ids of a sample's tree in depth-first pre-order.
+    pub fn preorder(&self, sample_id: &str) -> Vec<String> {
+        self.sample_gates.get(sample_id).map(|t| preorder_of(t)).unwrap_or_default()
+    }
+
+    /// Template gate ids of a group in depth-first pre-order.
+    pub fn group_preorder(&self, group_id: &str) -> Vec<String> {
+        self.group(group_id).map(|g| preorder_of(&g.gates)).unwrap_or_default()
     }
 
     pub fn channel_statistics(&mut self, sample_id: &str, gate_id: Option<&str>, channel: &str, compensated: bool) -> Result<ChannelStats> {
@@ -506,9 +1022,12 @@ impl Workspace {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
+    /// Parse a workspace document; version-1 files (one shared `gates` list)
+    /// become an "All Samples" group whose gates are copied into every sample.
     pub fn from_json(json: &str) -> Result<Self> {
         let mut ws: Workspace = serde_json::from_str(json)?;
         ws.next_id = 1;
+        ws.normalize();
         Ok(ws)
     }
 
@@ -526,12 +1045,24 @@ impl Workspace {
     }
 }
 
-trait ChainIds<'a> {
-    fn chain_ids(self) -> Box<dyn Iterator<Item = &'a str> + 'a>;
+fn dedup(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v.dedup();
+    v
 }
-impl<'a, I: Iterator<Item = &'a SampleInfo> + 'a> ChainIds<'a> for I {
-    fn chain_ids(self) -> Box<dyn Iterator<Item = &'a str> + 'a> {
-        Box::new(self.map(|s| s.id.as_str()))
+
+fn apply_patch(g: &mut GateNode, shape: Option<GateShape>, name: Option<&str>, negate: Option<bool>, color: Option<Option<String>>) {
+    if let Some(c) = color {
+        g.color = c;
+    }
+    if let Some(s) = shape {
+        g.gate.shape = s;
+    }
+    if let Some(n) = name {
+        g.name = n.to_string();
+    }
+    if let Some(n) = negate {
+        g.gate.negate = n;
     }
 }
 

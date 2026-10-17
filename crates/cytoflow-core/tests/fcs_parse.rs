@@ -242,12 +242,25 @@ fn workspace_json_roundtrip_with_every_gate_shape() {
             false,
         )
         .unwrap();
-    ws.gates
+    ws.groups[0]
+        .gates
         .iter_mut()
         .find(|g| g.id == poly)
         .unwrap()
         .gate
         .grid = Some(256);
+    ws.sample_gates
+        .get_mut(&sid)
+        .unwrap()
+        .iter_mut()
+        .find(|g| g.id == poly)
+        .unwrap()
+        .node
+        .gate
+        .grid = Some(256);
+    // Gates added to "All Samples" are copied into the sample's own tree.
+    assert_eq!(ws.sample_tree(&sid).unwrap().len(), 5);
+    assert!(ws.sample_tree(&sid).unwrap().iter().all(|g| !g.tailored));
 
     let ids = [&rect, &range, &poly, &ell, &boolean];
     let counts: Vec<usize> = ids
@@ -259,12 +272,15 @@ fn workspace_json_roundtrip_with_every_gate_shape() {
     let json = ws.to_json().unwrap();
     let mut back = Workspace::from_json(&json).unwrap();
     assert_eq!(back.name, ws.name);
-    assert_eq!(back.gates, ws.gates);
+    assert_eq!(back.version, 2);
+    assert_eq!(back.gates(), ws.gates());
+    assert_eq!(back.groups, ws.groups);
+    assert_eq!(back.sample_gates, ws.sample_gates);
     assert_eq!(back.samples, ws.samples);
     assert_eq!(back.channel_settings, ws.channel_settings);
     assert_eq!(back.compensation, ws.compensation);
-    for g in &ws.gates {
-        assert_eq!(back.gate_path(&g.id), ws.gate_path(&g.id));
+    for g in ws.gates() {
+        assert_eq!(back.gate_path(&sid, &g.id), ws.gate_path(&sid, &g.id));
     }
     assert!(back.reload_samples(None).is_empty());
     let back_counts: Vec<usize> = ids
@@ -286,4 +302,52 @@ fn workspace_json_roundtrip_with_every_gate_shape() {
         )
         .unwrap();
     assert!(!ids.iter().any(|g| **g == new_id));
+    assert!(back.gate(&sid, &new_id).is_ok());
+}
+
+/// A version-1 document (one shared `gates` list, no groups) is read as an
+/// "All Samples" group whose gates are copied into every sample.
+#[test]
+fn workspace_version1_migration() {
+    let data = testdata().join("gate_ref/data1.fcs");
+    let v1 = serde_json::json!({
+        "version": 1,
+        "name": "old",
+        "samples": [
+            { "id": "s1", "name": "a.fcs", "path": data, "event_count": 0 },
+            { "id": "s2", "name": "b.fcs", "path": data, "event_count": 0 }
+        ],
+        "channel_settings": {},
+        "compensation": { "source": "none" },
+        "gates": [
+            { "id": "g3", "name": "R", "parent": null, "color": null,
+              "gate": { "negate": false, "shape": { "type": "rectangle", "dims": [{ "channel": "FL1-H", "compensated": false }], "min": [0.2], "max": [null] } } },
+            { "id": "g4", "name": "R2", "parent": "g3", "color": null,
+              "gate": { "negate": true, "shape": { "type": "rectangle", "dims": [{ "channel": "FL2-H", "compensated": false }], "min": [null], "max": [0.5] } } }
+        ]
+    });
+    let mut ws = Workspace::from_json(&v1.to_string()).unwrap();
+    assert_eq!(ws.version, 2);
+    assert_eq!(ws.groups.len(), 1);
+    assert_eq!(ws.groups[0].id, "all");
+    assert_eq!(ws.groups[0].name, "All Samples");
+    assert_eq!(ws.groups[0].sample_ids, vec!["s1".to_string(), "s2".to_string()]);
+    assert_eq!(ws.gates().len(), 2);
+    for s in ["s1", "s2"] {
+        assert_eq!(ws.preorder(s), vec!["g3".to_string(), "g4".to_string()]);
+        assert_eq!(ws.gate_path(s, "g4"), "R/R2");
+    }
+    assert!(ws.reload_samples(None).is_empty());
+    assert_eq!(ws.count("s1", Some("g4")).unwrap(), ws.count("s2", Some("g4")).unwrap());
+    // Saved again as version 2 (no top-level `gates`).
+    let v: serde_json::Value = serde_json::from_str(&ws.to_json().unwrap()).unwrap();
+    assert_eq!(v["version"], 2);
+    assert!(v.get("gates").is_none());
+    assert_eq!(v["sample_gates"]["s2"][1]["tailored"], false);
+    assert_eq!(v["sample_gates"]["s2"][1]["gate"]["negate"], true);
+    // New gates get fresh ids.
+    let id = ws
+        .add_gate("x", None, GateShape::Rectangle { dims: vec![d("FL1-H", false)], min: vec![None], max: vec![Some(0.1)] }, false)
+        .unwrap();
+    assert!(id != "g3" && id != "g4");
 }

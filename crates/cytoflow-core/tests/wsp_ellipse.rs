@@ -18,8 +18,8 @@ fn flowjo_ellipse_on_linear_axes_is_exact() {
     assert!(imp.missing_files.is_empty());
     let ws = &mut imp.workspace;
     let sid = ws.samples[0].id.clone();
-    let gid = ws.gates[0].id.clone();
-    let GateShape::Ellipse { center, a, b, .. } = ws.gates[0].gate.shape.clone() else { panic!("not an ellipse") };
+    let gid = ws.sample_tree(&sid).unwrap()[0].id.clone();
+    let GateShape::Ellipse { center, a, b, .. } = ws.sample_tree(&sid).unwrap()[0].gate.shape.clone() else { panic!("not an ellipse") };
     // Centre = midpoint of the foci = midpoint of the edge vertices;
     // semi-major axis = half the distance between the first two edge
     // vertices (39.58 grid units), not `gating:distance / 2` (44.6).

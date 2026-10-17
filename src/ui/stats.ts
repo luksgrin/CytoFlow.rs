@@ -1,6 +1,6 @@
 // Right column: population statistics table and per-channel statistics.
 import { api } from "../ipc";
-import { channelLabel, gate, gatePath, isLoaded, on, sample, selectPopulation, state } from "../state";
+import { channelLabel, gate, gatePath, isLoaded, on, sample, sampleGate, selectPopulation, state } from "../state";
 import type { ChannelStats } from "../types";
 import { exportStats } from "./actions";
 import { openCompensation } from "./compensation";
@@ -47,16 +47,26 @@ function renderComp(): void {
 
 function renderPops(): void {
   clear(popBody);
+  // Population statistics are computed on the plotted sample's own tree.
   const depth = (id: string | null) => {
     let d = 0;
-    for (let g = gate(id); g; g = gate(g.parent)) d++;
+    for (let g = sampleGate(id); g; g = sampleGate(g.parent)) d++;
     return d;
   };
+  const path = (id: string | null) => {
+    const parts: string[] = [];
+    for (let g = sampleGate(id); g; g = sampleGate(g.parent)) parts.unshift(g.name);
+    return parts.length ? parts.join(" / ") : "All events";
+  };
   for (const st of state.popStats) {
-    const g = gate(st.gate_id);
+    const g = sampleGate(st.gate_id);
+    // Rows of populations that are not in the viewed tree (e.g. sample-only
+    // gates while a group is selected) cannot be selected there.
+    const selectable = !st.gate_id || !!gate(st.gate_id);
     popBody.append(h("tr", {
-      class: `${st.gate_id === state.gateId ? "selected" : ""}`, onclick: () => selectPopulation(st.gate_id),
-      title: gatePath(st.gate_id),
+      class: `${st.gate_id === state.gateId ? "selected" : ""}${g?.tailored ? " tailored" : ""}${selectable ? "" : " outside"}`,
+      onclick: () => selectable && selectPopulation(st.gate_id),
+      title: `${path(st.gate_id)}${g?.tailored ? " (tailored)" : ""}`,
     },
       h("td", { style: `padding-left:${6 + depth(st.gate_id) * 10}px` },
         g ? h("span", { class: "swatch-dot", style: `background:${gateColor(g)}` }) : "", ` ${st.name}`),
