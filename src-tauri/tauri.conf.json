@@ -28,6 +28,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "category": "public.app-category.medical",
     "shortDescription": "Flow cytometry analysis",
     "longDescription": "CytoFlow.rs is an open-source flow cytometry analysis application.",
@@ -67,6 +68,17 @@
       },
       "appimage": {
         "bundleMediaFramework": false
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlENzM3MkI5MDg3QjUzNDkKUldSSlUzc0l1WEp6blZXWG9DdXB3UGdXYzZ3SkJSRGQ0aWlxMGZNSDYrYkxmb2dqUkdSSHZHOEIK",
+      "endpoints": [
+        "https://github.com/luksgrin/CytoFlow.rs/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

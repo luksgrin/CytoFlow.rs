@@ -8,6 +8,7 @@ import { initStats } from "./ui/stats";
 import { initStatus, run, status } from "./ui/status";
 import { initTheme } from "./ui/theme";
 import { initToolbar } from "./ui/toolbar";
+import { initUpdates } from "./ui/updates";
 import { initWorkspacePanel } from "./ui/workspace";
 
 function el(id: string): HTMLElement {
@@ -30,6 +31,7 @@ async function boot(): Promise<void> {
     await applyWorkspace(await api.workspaceGet());
     status.info(isTauri ? "Ready" : "Running in the browser with synthetic mock data");
   });
+  initUpdates();
 }
 
 void boot();

@@ -4,6 +4,7 @@
 
 mod commands;
 mod state;
+mod updates;
 
 use tauri::Manager;
 
@@ -14,6 +15,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(AppState::default())
         .setup(|app| {
             // Files passed on the command line (`open CytoFlow.app --args a.fcs b.wsp`)
@@ -63,6 +66,8 @@ pub fn run() {
             commands::export_stats_csv,
             commands::export_image,
             commands::write_text_file,
+            updates::update_check,
+            updates::update_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running CytoFlow");

@@ -138,6 +138,47 @@ type Tick            = { pos: number; label: string; major: boolean };  // pos i
 
 Errors: every command returns `Err(String)` with a human-readable message; the frontend shows it in the status bar.
 
+### Updates
+
+Implemented in `src-tauri/src/updates.rs` on top of `tauri-plugin-updater`
+(endpoint and public key in `tauri.conf.json` → `plugins.updater`). The version
+policy is enforced here, not in the UI, and the webview is not granted the
+plugin's own `updater:*` commands, so it cannot install anything else.
+
+| command | args | returns |
+|---|---|---|
+| `update_check` | `{ includePrerelease: boolean, skipVersion?: string }` | `UpdateInfo` |
+| `update_install` | `{ version: string, includePrerelease?: boolean }` | does not return on success (the app relaunches); `Err` otherwise |
+
+```ts
+interface UpdateInfo {
+  available: boolean;       // can be installed in place now
+  version: string | null;   // newest published version, when newer than the running one
+  currentVersion: string;
+  notes: string | null;     // release notes from latest.json
+  date: string | null;      // RFC 3339 publication date
+  skipped: boolean;         // version == skipVersion (then available is false)
+  reason: "major" | "prerelease" | "deb" | null; // why a newer version is not available
+  url: string | null;       // releases page for that version, set when reason is set
+}
+```
+
+* `update_check` reads `latest.json` from the latest GitHub release. A version
+  whose **major** number differs from the running one is reported with
+  `available: false, reason: "major"`; pre-releases with `reason: "prerelease"`
+  unless `includePrerelease` (the release workflow never publishes a manifest for
+  a pre-release, so this cannot happen today); a Debian/RPM package install with
+  `reason: "deb"` (the package manager owns those files). `skipVersion` is the
+  version the user chose to skip (kept by the UI in `localStorage`).
+* `update_install` checks again with the same rules and installs only if the
+  installable version equals `version`. While downloading it emits
+  **`update-progress`** events `{ downloaded: number, total: number | null, finished: boolean }`
+  (`total` from `Content-Length`; `finished: true` once the download is verified
+  and installation starts). The signature is verified against the public key
+  before anything is installed. On macOS and Linux (AppImage) the app then
+  relaunches; on Windows the installer closes the app and restarts it. Refused in
+  debug builds.
+
 ### `plot_2d` binary layout (little-endian)
 
 Returned as `tauri::ipc::Response` (raw bytes); on the frontend `invoke` yields an `ArrayBuffer`.

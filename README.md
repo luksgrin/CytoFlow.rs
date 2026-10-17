@@ -50,6 +50,8 @@ The builds are not code-signed:
 
 **Linux:** `sudo apt install ./CytoFlow_<version>_amd64.deb`, or `chmod +x` the AppImage and run it.
 
+**Updates:** CytoFlow checks for new releases (at most once a day; **⟳ Updates** in the toolbar checks now) and installs updates within the same major version in place on macOS, Windows and the AppImage. See [Updating](https://luksgrin.xyz/CytoFlow.rs/installation/#updating).
+
 ### Building from Source
 
 See [Building from Source](https://luksgrin.xyz/CytoFlow.rs/building/) for detailed instructions, or follow the quick start below.
@@ -95,7 +97,8 @@ npm install
 scripts/fetch-testdata.sh            # optional: large fixtures for the wsp import tests
 cargo test -p cytoflow-core          # engine tests (Gating-ML conformance, wsp import)
 cargo tauri dev                      # run the app with hot reload
-cargo tauri build                    # installers in target/release/bundle/
+cargo tauri build                    # installers in target/release/bundle/ (needs the updater key,
+                                     # or --config '{"bundle":{"createUpdaterArtifacts":false}}')
 ```
 
 `npm run dev` alone runs the user interface in a browser against a mock engine with synthetic data, which is handy for UI work.

@@ -674,6 +674,8 @@ function dispatch(cmd: string, a: Args): unknown {
       return n;
     }
     case "export_stats_csv": return ws.samples.reduce((n, s) => n + (ws.sample_gates[s.id]?.length ?? 0) + 1, 0);
+    case "update_check": return { available: false, version: null, currentVersion: "0.0.0-mock", notes: null, date: null, skipped: false, reason: null, url: null };
+    case "update_install": throw "updates are not available in the browser preview";
     default: throw `unknown command ${cmd}`;
   }
 }
