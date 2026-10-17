@@ -1,10 +1,12 @@
-// Layout editor model: page + panels, persistence and live panel data.
-// Persisted in localStorage keyed by workspace name (a `layouts` field in the
-// workspace file would be the proper long-term home).
+// Layout editor model: named pages of panels, persistence and live panel data.
+// Layouts are stored in the workspace file (`WorkspaceView.layouts`, written
+// with `layouts_set`). localStorage only holds a draft copy for a workspace
+// that has never been saved, and is read once to migrate layouts kept there
+// by earlier versions (`cytoflow.layout:<workspace name>`).
 import { api } from "../ipc";
 import type { PlotKind, PlotData } from "../plot/render";
 import { gate, gatePath, gatePathIn, isLoaded, sampleGates, state } from "../state";
-import type { GateDim, PopulationStats } from "../types";
+import type { GateDim, PopulationStats, StoredLayout } from "../types";
 
 export type PageSize = "a4" | "letter";
 export type PanelKind = "plot" | "stats";
@@ -46,28 +48,87 @@ export function pageDims(l: Layout): [number, number] {
 
 export const emptyLayout = (): Layout => ({ version: 1, size: "a4", landscape: false, panels: [] });
 
-// ---------------------------------------------------------------- persistence
+/** A named page as kept by the editor (`data` = the page document). */
+export interface NamedLayout {
+  id: string;
+  name: string;
+  data: Layout;
+}
 
-const key = (wsName: string) => `cytoflow.layout:${wsName || "Untitled"}`;
+let layoutSeq = 0;
+export const newLayoutId = () => `L${Date.now().toString(36)}${(layoutSeq++).toString(36)}`;
 
-export function loadLayout(wsName: string): Layout | null {
+/** Validate a page document read from the workspace or the browser store. */
+export function parseLayout(v: unknown): Layout | null {
+  const l = v as Layout | null;
+  if (!l || typeof l !== "object" || l.version !== 1 || !Array.isArray(l.panels)) return null;
+  return { version: 1, size: l.size === "letter" ? "letter" : "a4", landscape: !!l.landscape, panels: l.panels };
+}
+
+/** Workspace layouts → editor layouts (invalid entries are dropped). */
+export function fromStored(list: StoredLayout[] | null | undefined): NamedLayout[] {
+  const out: NamedLayout[] = [];
+  for (const s of list ?? []) {
+    const data = parseLayout(s?.data);
+    if (data && typeof s.id === "string") out.push({ id: s.id, name: String(s.name ?? "Layout"), data });
+  }
+  return out;
+}
+
+export const toStored = (list: NamedLayout[]): StoredLayout[] => list.map((l) => ({ id: l.id, name: l.name, data: l.data }));
+
+/** Smallest unused "Layout N" name. */
+export function nextLayoutName(list: NamedLayout[], prefix = "Layout"): string {
+  const used = new Set(list.map((l) => l.name));
+  let n = 1;
+  while (used.has(`${prefix} ${n}`)) n++;
+  return `${prefix} ${n}`;
+}
+
+// ---------------------------------------------------------------- browser store
+
+const legacyKey = (wsName: string) => `cytoflow.layout:${wsName || "Untitled"}`;
+const draftKey = (wsName: string) => `cytoflow.layouts-draft:${wsName || "Untitled"}`;
+
+function readJson(k: string): unknown {
   try {
-    const raw = localStorage.getItem(key(wsName));
-    if (!raw) return null;
-    const l = JSON.parse(raw) as Layout;
-    return l && l.version === 1 && Array.isArray(l.panels) ? l : null;
+    const raw = localStorage.getItem(k);
+    return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
 
-export function saveLayout(wsName: string, l: Layout): void {
+function removeKey(k: string): void {
   try {
-    localStorage.setItem(key(wsName), JSON.stringify(l));
+    localStorage.removeItem(k);
   } catch {
-    /* storage unavailable: layout lives for this session only */
+    /* storage unavailable */
   }
 }
+
+/** One-time migration: the single layout earlier versions kept per workspace name (the key is removed). */
+export function takeLegacyLayout(wsName: string): Layout | null {
+  const l = parseLayout(readJson(legacyKey(wsName)));
+  if (l) removeKey(legacyKey(wsName));
+  return l;
+}
+
+/** Draft layouts of a workspace that has never been saved. */
+export const loadDraft = (wsName: string): NamedLayout[] => {
+  const v = readJson(draftKey(wsName));
+  return Array.isArray(v) ? fromStored(v as StoredLayout[]) : [];
+};
+
+export function saveDraft(wsName: string, list: NamedLayout[]): void {
+  try {
+    localStorage.setItem(draftKey(wsName), JSON.stringify(toStored(list)));
+  } catch {
+    /* storage unavailable: the draft lives in the backend only */
+  }
+}
+
+export const removeDraft = (wsName: string) => removeKey(draftKey(wsName));
 
 // ---------------------------------------------------------------- panels
 

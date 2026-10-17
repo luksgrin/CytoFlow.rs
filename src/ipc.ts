@@ -3,7 +3,7 @@
 import type {
   ChannelStats, CompMatrix, CompSource, GateAddResult, GateDim, GateScope, GateShape, Group,
   GroupCreateResult, HistResult, ImportResult, OpenResult, Plot2D, Plot2DHeader, PopulationStats,
-  Tick, Transform, TransformKind, WorkspaceView,
+  StoredLayout, Tick, Transform, TransformKind, WorkspaceView,
 } from "./types";
 
 export type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
@@ -120,6 +120,10 @@ export const api = {
   workspaceSave: (path: string) => call<WorkspaceView>("workspace_save", { path }),
   workspaceImportWsp: (path: string, searchDirs: string[]) =>
     call<ImportResult>("workspace_import_wsp", { path, searchDirs }),
+  layoutsGet: () => call<StoredLayout[]>("layouts_get"),
+  layoutsSet: (layouts: StoredLayout[]) => call<WorkspaceView>("layouts_set", { layouts }),
+  uiStateGet: () => call<unknown>("ui_state_get"),
+  uiStateSet: (uiState: unknown) => call<WorkspaceView>("ui_state_set", { uiState }),
   sampleAdd: (paths: string[]) => call<OpenResult>("sample_add", { paths }),
   sampleRemove: (sampleId: string) => call<WorkspaceView>("sample_remove", { sampleId }),
   sampleKeywords: (sampleId: string) => call<Record<string, string>>("sample_keywords", { sampleId }),

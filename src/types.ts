@@ -103,8 +103,19 @@ export interface WorkspaceView {
   sample_gates: Record<string, SampleGateNode[]>;
   /** The "All Samples" template (= groups[0].gates), kept for compatibility. */
   gates: GateNode[];
+  /** Named layout-editor pages, saved in the workspace file (`data` is opaque to the backend). */
+  layouts: StoredLayout[];
+  /** Small UI preferences saved in the workspace file (null when never set). */
+  ui_state: unknown;
   loaded: string[];
   path: string | null;
+}
+
+/** A named layout as stored by the backend; `data` is the frontend's page document. */
+export interface StoredLayout {
+  id: string;
+  name: string;
+  data: unknown;
 }
 
 export interface GroupCreateResult {

@@ -1,10 +1,12 @@
 // Graph-window overlays: extra populations and/or samples drawn over the current plot.
 // Data comes from plot_hist / plot_2d, called once per overlay item and cached.
+// The selection (items, normalisation, style) is saved in the workspace's
+// `ui_state.overlay` and restored when the workspace is reopened.
 import { api } from "../ipc";
 import { GATE_COLORS } from "../plot/colormap";
 import type { HistNorm, OverlayStyle, Series } from "../plot/overlay";
 import type { PlotData } from "../plot/render";
-import { gate, gatePathIn, isLoaded, on, sampleGates, state } from "../state";
+import { gate, gatePathIn, isLoaded, on, sampleGates, setUiState, state, uiState, workspaceGeneration } from "../state";
 import type { GateDim } from "../types";
 import { h } from "./dom";
 import { modal } from "./modal";
@@ -24,7 +26,27 @@ const cache = new Map<string, PlotData>();
 
 export const overlayActive = () => overlay.items.length > 0;
 export const onOverlayChange = (fn: () => void) => listeners.add(fn);
-const changed = () => listeners.forEach((f) => f());
+const notify = () => listeners.forEach((f) => f());
+/** A user change: re-render and save the selection into the workspace (debounced). */
+const changed = () => {
+  setUiState({ overlay: { items: overlay.items, norm: overlay.norm, style: overlay.style } });
+  notify();
+};
+
+const NORMS: HistNorm[] = ["mode", "total", "count"];
+const STYLES: OverlayStyle[] = ["contour", "dots"];
+
+/** Load the overlay saved in the workspace's UI state (a newly opened workspace). */
+function restore(): void {
+  const saved = uiState().overlay as { items?: unknown; norm?: unknown; style?: unknown } | undefined;
+  const items = Array.isArray(saved?.items) ? (saved.items as OverlayItem[]) : [];
+  overlay.items = items
+    .filter((it) => it && typeof it.sampleId === "string" && (it.gateId === null || typeof it.gateId === "string"))
+    .map((it) => ({ sampleId: it.sampleId, gateId: it.gateId }))
+    .slice(0, MAX_ITEMS);
+  overlay.norm = NORMS.includes(saved?.norm as HistNorm) ? (saved!.norm as HistNorm) : "mode";
+  overlay.style = STYLES.includes(saved?.style as OverlayStyle) ? (saved!.style as OverlayStyle) : "contour";
+}
 
 export function setOverlayOption(patch: Partial<Pick<typeof overlay, "norm" | "style">>): void {
   Object.assign(overlay, patch);
@@ -38,13 +60,21 @@ export function clearOverlay(): void {
 
 /** Drop items whose sample or gate has disappeared; any workspace change invalidates the cache. */
 export function initOverlay(): void {
-  on("workspace", () => {
+  let gen = -1;
+  const onWorkspace = () => {
     cache.clear();
     const ws = state.ws;
+    const fresh = gen !== workspaceGeneration();
+    gen = workspaceGeneration();
+    if (fresh) restore();
     const before = overlay.items.length;
-    overlay.items = overlay.items.filter((it) => ws?.samples.some((s) => s.id === it.sampleId) && (it.gateId === null || !!gate(it.gateId)));
-    if (overlay.items.length !== before) changed();
-  });
+    // Gate ids are shared between a sample's tree and its groups' templates.
+    overlay.items = overlay.items.filter((it) => ws?.samples.some((s) => s.id === it.sampleId) && (it.gateId === null || !!gate(it.gateId) || sampleGates(it.sampleId).some((g) => g.id === it.gateId)));
+    if (fresh) notify();
+    else if (overlay.items.length !== before) changed();
+  };
+  on("workspace", onWorkspace);
+  if (state.ws) onWorkspace();
 }
 
 const dimKey = (d: GateDim | null) => (d ? `${d.channel}:${d.compensated ? 1 : 0}` : "-");

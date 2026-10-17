@@ -5,7 +5,7 @@ use crate::state::{AppState, Inner};
 use cytoflow_core::compensation::CompMatrix;
 use cytoflow_core::plot;
 use cytoflow_core::stats::ChannelStats;
-use cytoflow_core::workspace::{CompSource, GateScope, Group, PopulationStats};
+use cytoflow_core::workspace::{CompSource, GateScope, Group, Layout, PopulationStats};
 use cytoflow_core::{export, wsp, GateDim, GateShape, Transform, TransformKind, Workspace};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -159,6 +159,36 @@ pub async fn workspace_import_wsp(app: AppHandle, path: String, search_dirs: Vec
         st.workspace = import.workspace;
         st.path = None;
         Ok(json!({ "workspace": st.view()?, "warnings": import.warnings, "missing": missing }))
+    })
+    .await
+}
+
+// ------------------------------------------------------- layouts & UI state
+
+#[tauri::command]
+pub async fn layouts_get(app: AppHandle) -> CmdResult<Vec<Layout>> {
+    with_state(app, |st| Ok(st.workspace.layouts().to_vec())).await
+}
+
+#[tauri::command]
+pub async fn layouts_set(app: AppHandle, layouts: Vec<Layout>) -> CmdResult<Value> {
+    with_state(app, move |st| {
+        st.workspace.set_layouts(layouts);
+        st.view()
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn ui_state_get(app: AppHandle) -> CmdResult<Value> {
+    with_state(app, |st| Ok(st.workspace.ui_state().clone())).await
+}
+
+#[tauri::command]
+pub async fn ui_state_set(app: AppHandle, ui_state: Value) -> CmdResult<Value> {
+    with_state(app, move |st| {
+        st.workspace.set_ui_state(ui_state);
+        st.view()
     })
     .await
 }

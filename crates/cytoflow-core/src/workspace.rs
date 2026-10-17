@@ -137,6 +137,16 @@ impl Default for GateScope {
     }
 }
 
+/// A named layout-editor page. The core does not interpret `data`: it is the
+/// frontend's layout document (items, page size, ...) stored verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Layout {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub data: serde_json::Value,
+}
+
 /// Serialisable workspace document.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Workspace {
@@ -155,6 +165,13 @@ pub struct Workspace {
     /// The effective gate tree of each sample (flat list, tree via `parent`).
     #[serde(default)]
     pub sample_gates: BTreeMap<String, Vec<SampleGate>>,
+    /// Named layouts of the layout editor (opaque to the core).
+    #[serde(default)]
+    pub layouts: Vec<Layout>,
+    /// Small UI preferences (last axes per sample, overlay selections, ...);
+    /// opaque to the core. `null` when never set.
+    #[serde(default)]
+    pub ui_state: serde_json::Value,
     /// Version-1 shared gate list; migrated into the "All Samples" group on load.
     #[serde(default, rename = "gates", skip_serializing)]
     legacy_gates: Vec<GateNode>,
@@ -175,6 +192,8 @@ impl Default for Workspace {
             compensation: CompSource::None,
             groups: vec![Group { id: ALL_SAMPLES.into(), name: ALL_SAMPLES_NAME.into(), sample_ids: Vec::new(), gates: Vec::new() }],
             sample_gates: BTreeMap::new(),
+            layouts: Vec::new(),
+            ui_state: serde_json::Value::Null,
             legacy_gates: Vec::new(),
             loaded: HashMap::new(),
             next_id: 1,
@@ -1016,6 +1035,28 @@ impl Workspace {
             None => None,
         };
         Ok(channel_stats(channel, &col, mask.as_deref().map(|v| v.as_slice())))
+    }
+
+    // ------------------------------------------------------- layouts & UI
+
+    /// The named layouts of the layout editor.
+    pub fn layouts(&self) -> &[Layout] {
+        &self.layouts
+    }
+
+    /// Replace all layouts.
+    pub fn set_layouts(&mut self, layouts: Vec<Layout>) {
+        self.layouts = layouts;
+    }
+
+    /// The stored UI preferences (`null` when never set).
+    pub fn ui_state(&self) -> &serde_json::Value {
+        &self.ui_state
+    }
+
+    /// Replace the stored UI preferences.
+    pub fn set_ui_state(&mut self, ui_state: serde_json::Value) {
+        self.ui_state = ui_state;
     }
 
     // -------------------------------------------------------- serialisation
