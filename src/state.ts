@@ -1,14 +1,23 @@
 // Application state + a tiny event emitter. UI modules subscribe to events and
 // re-render; all backend mutations go through `applyWorkspace`.
-import { api } from "./ipc";
+import { api, setDefaultScope } from "./ipc";
 import type { PlotKind } from "./plot/render";
-import type { GateDim, GateNode, PopulationStats, SampleInfo, WorkspaceView } from "./types";
+import {
+  ALL_SAMPLES, type GateDim, type GateNode, type GateScope, type Group, type PopulationStats,
+  type SampleInfo, type Transform, type WorkspaceView,
+} from "./types";
 
 export type Tool = "select" | "rect" | "polygon" | "ellipse" | "range" | "quadrant";
 export type EventName = "workspace" | "selection" | "axes" | "plotkind" | "tool" | "stats" | "theme" | "view" | "gatesel";
 
 export interface AppState {
   ws: WorkspaceView | null;
+  /**
+   * Selected group (its template tree is shown and gate edits apply to the
+   * group), or null when a single sample is selected (edits tailor it).
+   */
+  groupId: string | null;
+  /** Sample whose data is plotted (and whose tree is shown when groupId is null). */
   sampleId: string | null;
   gateId: string | null; // selected population (null = All events)
   x: GateDim | null;
@@ -22,7 +31,7 @@ export interface AppState {
 }
 
 export const state: AppState = {
-  ws: null, sampleId: null, gateId: null, x: null, y: null, hist: false,
+  ws: null, groupId: ALL_SAMPLES, sampleId: null, gateId: null, x: null, y: null, hist: false,
   plotKind: "pseudo", tool: "select", view: "graph", popStats: [], plotGate: null,
 };
 
@@ -45,8 +54,45 @@ export function emit(ev: EventName): void {
 
 export const sample = (): SampleInfo | null => state.ws?.samples.find((s) => s.id === state.sampleId) ?? null;
 export const isLoaded = (id: string | null) => !!id && !!state.ws?.loaded.includes(id);
-export const gate = (id: string | null): GateNode | null => (id ? state.ws?.gates.find((g) => g.id === id) ?? null : null);
-export const children = (parent: string | null): GateNode[] => state.ws?.gates.filter((g) => g.parent === parent) ?? [];
+export const groupById = (id: string | null): Group | null => (id ? state.ws?.groups.find((g) => g.id === id) ?? null : null);
+export const group = (): Group | null => groupById(state.groupId);
+/** Groups that contain a sample (All Samples first). */
+export const groupsOf = (sampleId: string | null): Group[] =>
+  sampleId ? state.ws?.groups.filter((g) => g.sample_ids.includes(sampleId)) ?? [] : [];
+
+/** Gate tree of a sample (its own copies, with `tailored` flags). */
+export const sampleGates = (sampleId: string | null = state.sampleId): GateNode[] =>
+  (sampleId ? state.ws?.sample_gates?.[sampleId] : undefined) ?? [];
+
+/**
+ * The tree being viewed and edited: the selected group's template, or the
+ * selected sample's own tree.
+ */
+export function currentGates(): GateNode[] {
+  if (!state.ws) return [];
+  const g = group();
+  return g ? g.gates : sampleGates();
+}
+
+/** Where gate edits apply now (passed by default to the gate commands). */
+export function currentScope(): GateScope {
+  if (state.groupId && group()) return { group: state.groupId };
+  if (state.sampleId) return { sample: state.sampleId };
+  return { group: ALL_SAMPLES };
+}
+setDefaultScope(currentScope);
+
+export const gate = (id: string | null): GateNode | null => (id ? currentGates().find((g) => g.id === id) ?? null : null);
+export const children = (parent: string | null): GateNode[] => currentGates().filter((g) => g.parent === parent);
+/** A gate of a sample's own tree (default: the plotted sample). */
+export const sampleGate = (id: string | null, sampleId: string | null = state.sampleId): GateNode | null =>
+  id ? sampleGates(sampleId).find((g) => g.id === id) ?? null : null;
+
+/** Effective transform of a channel for a sample (override, else the default). */
+export function transformFor(channel: string, sampleId: string | null = state.sampleId): Transform | null {
+  const ov = sampleId ? state.ws?.sample_channel_settings?.[sampleId]?.[channel] : undefined;
+  return ov?.transform ?? state.ws?.channel_settings[channel]?.transform ?? null;
+}
 export const compAvailable = () => !!state.ws && state.ws.compensation.source !== "none";
 export const statFor = (gateId: string | null) => state.popStats.find((s) => s.gate_id === gateId) ?? null;
 export const isScatterName = (ch: string) => /^(FSC|SSC|Time)/i.test(ch);
@@ -116,24 +162,53 @@ function fixAxes(): boolean {
 }
 
 export async function applyWorkspace(ws: WorkspaceView): Promise<void> {
+  // Tolerate an older backend / mock view without the group fields.
+  ws.groups ??= [{ id: ALL_SAMPLES, name: "All Samples", sample_ids: ws.samples.map((s) => s.id), gates: ws.gates ?? [] }];
+  ws.sample_gates ??= Object.fromEntries(ws.samples.map((s) => [s.id, (ws.gates ?? []).map((g) => ({ ...g, tailored: false }))]));
+  ws.sample_channel_settings ??= {};
   state.ws = ws;
   if (!ws.samples.some((s) => s.id === state.sampleId)) state.sampleId = ws.samples[0]?.id ?? null;
-  if (state.gateId && !ws.gates.some((g) => g.id === state.gateId)) state.gateId = null;
-  if (state.plotGate && !ws.gates.some((g) => g.id === state.plotGate)) state.plotGate = null;
+  if (state.groupId && !ws.groups.some((g) => g.id === state.groupId)) state.groupId = ALL_SAMPLES;
+  if (!state.groupId && !state.sampleId) state.groupId = ALL_SAMPLES;
+  const ids = new Set(currentGates().map((g) => g.id));
+  if (state.gateId && !ids.has(state.gateId)) state.gateId = null;
+  if (state.plotGate && !ids.has(state.plotGate)) state.plotGate = null;
   const axesChanged = fixAxes();
   emit("workspace");
   if (axesChanged) emit("axes");
   await refreshStats();
 }
 
+/** Select a single sample: its own tree is shown and gate edits tailor it. */
 export async function selectSample(id: string): Promise<void> {
-  if (state.sampleId === id) return;
+  if (state.sampleId === id && state.groupId === null) return;
+  const sampleChanged = state.sampleId !== id;
   state.sampleId = id;
+  state.groupId = null;
   state.plotGate = null;
+  if (state.gateId && !sampleGate(state.gateId, id)) state.gateId = null;
   const axesChanged = fixAxes();
   emit("selection");
   if (axesChanged) emit("axes");
-  await refreshStats();
+  if (sampleChanged) await refreshStats();
+}
+
+/**
+ * Select a group: its template tree is shown and gate edits apply to the
+ * group. The plotted sample stays if it is a member, else the first member.
+ */
+export async function selectGroup(id: string): Promise<void> {
+  const g = groupById(id);
+  if (!g || state.groupId === id) return;
+  state.groupId = id;
+  state.plotGate = null;
+  const prev = state.sampleId;
+  if (g.sample_ids.length && !g.sample_ids.includes(state.sampleId ?? "")) state.sampleId = g.sample_ids[0];
+  if (state.gateId && !g.gates.some((x) => x.id === state.gateId)) state.gateId = null;
+  const axesChanged = fixAxes();
+  emit("selection");
+  if (axesChanged) emit("axes");
+  if (prev !== state.sampleId) await refreshStats();
 }
 
 export function selectPopulation(id: string | null): void {
@@ -162,8 +237,9 @@ export function setPlotGate(id: string | null): void {
 
 /** Smallest unused "Gate N" name. */
 export function nextGateName(prefix = "Gate"): string {
-  const used = new Set(state.ws?.gates.map((g) => g.name));
-  let n = (state.ws?.gates.length ?? 0) + 1;
+  const gates = currentGates();
+  const used = new Set(gates.map((g) => g.name));
+  let n = gates.length + 1;
   while (used.has(`${prefix} ${n}`)) n++;
   return `${prefix} ${n}`;
 }

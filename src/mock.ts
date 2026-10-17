@@ -1,8 +1,9 @@
 // In-memory implementation of the IPC contract (docs/ipc.md) used when the UI
-// runs in a plain browser. Same command names, args and return shapes.
+// runs in a plain browser. Same command names, args and return shapes,
+// including groups (template trees) and per-sample gate trees / transforms.
 import type {
-  ChannelStats, CompMatrix, CompSource, GateDim, GateNode, GateShape, HistResult,
-  PopulationStats, SampleInfo, Transform, TransformKind, WorkspaceView,
+  ChannelStats, CompMatrix, CompSource, GateDim, GateNode, GateScope, GateShape, Group, HistResult,
+  PopulationStats, SampleGateNode, SampleInfo, Transform, TransformKind, WorkspaceView,
 } from "./types";
 import {
   CHANNELS, D0, D1, defaultTransform, demoSpill, fwd, generateSample, hash, initialTransform,
@@ -44,8 +45,10 @@ function makeSample(path: string): MockSample {
   return s;
 }
 
-function tf(ch: string): Transform {
-  return ws.channel_settings[ch]?.transform ?? initialTransform(ch);
+/** Effective transform: the sample's override if any, else the default. */
+function tf(ch: string, sid: string | null = null): Transform {
+  const ov = sid ? ws.sample_channel_settings[sid]?.[ch]?.transform : undefined;
+  return ov ?? ws.channel_settings[ch]?.transform ?? initialTransform(ch);
 }
 const disp = (ch: string, raw: number) => fwd(tf(ch), raw);
 
@@ -53,8 +56,10 @@ function emptyWorkspace(): WorkspaceView {
   const channel_settings: WorkspaceView["channel_settings"] = {};
   CHANNELS.forEach(([c]) => (channel_settings[c] = { transform: initialTransform(c) }));
   return {
-    version: 1, name: "Untitled", samples: [], channel_settings,
-    compensation: { source: "fcs" }, gates: [], loaded: [], path: null,
+    version: 2, name: "Untitled", samples: [], channel_settings, sample_channel_settings: {},
+    compensation: { source: "fcs" },
+    groups: [{ id: "all", name: "All Samples", sample_ids: [], gates: [] }],
+    sample_gates: {}, gates: [], loaded: [], path: null,
   };
 }
 
@@ -69,15 +74,17 @@ function addSamples(paths: string[]): string[] {
     samples.set(s.info.id, s);
     ws.samples.push(s.info);
     ws.loaded.push(s.info.id);
+    // New samples join All Samples and receive a copy of its gates.
+    ws.groups[0].sample_ids.push(s.info.id);
+    ws.sample_gates[s.info.id] = [];
+    preorderOf(ws.groups[0].gates).forEach((n) => insertCopy(s.info.id, n));
   }
   return errors;
 }
 
 const dim = (channel: string, compensated = false): GateDim => ({ channel, compensated });
 function addGate(name: string, parent: string | null, shape: GateShape, color: string | null = null): string {
-  const id = `g${idCounter++}`;
-  ws.gates.push({ id, name, parent, gate: { shape, negate: false }, color });
-  return id;
+  return scopedAdd({ group: "all" }, name, parent, shape, false, color);
 }
 
 function demoWorkspace(): void {
@@ -107,6 +114,10 @@ function demoWorkspace(): void {
     type: "rectangle", dims: [dim("APC-A", true), dim("FITC-A", true)],
     min: [disp("APC-A", 900), null], max: [null, disp("FITC-A", 600)],
   }, "#d97706");
+  // A "Donors" group, and Donor3's T-cell gate tailored to that sample.
+  ws.groups.push({ id: `grp${idCounter++}`, name: "Donors", sample_ids: ws.samples.slice(0, 2).map((s) => s.id), gates: [] });
+  const s3 = ws.samples[2]?.id;
+  if (s3) scopedUpdate({ sample: s3 }, t, { shape: { type: "rectangle", dims: [dim("FITC-A", true)], min: [disp("FITC-A", 1500)], max: [null] } });
 }
 
 // ---------------------------------------------------------------- evaluation
@@ -148,7 +159,7 @@ function display(s: MockSample, d: GateDim): Float32Array {
   const hit = cache.get(key);
   if (hit) return hit as Float32Array;
   const v = values(s, d);
-  const t = tf(d.channel);
+  const t = tf(d.channel, s.info.id);
   const out = new Float32Array(v.length);
   for (let i = 0; i < v.length; i++) out[i] = Math.min(D1, Math.max(D0, fwd(t, v[i])));
   cache.set(key, out);
@@ -207,8 +218,8 @@ function gateMask(s: MockSample, gateId: string | null): Uint8Array {
   const key = `m|${s.info.id}|${gateId}`;
   const hit = cache.get(key);
   if (hit) return hit as Uint8Array;
-  const g = ws.gates.find((x) => x.id === gateId);
-  if (!g) throw `unknown gate ${gateId}`;
+  const g = treeOf(s.info.id).find((x) => x.id === gateId);
+  if (!g) throw `gate not found: ${gateId}`;
   const parent = gateMask(s, g.parent);
   const sm = shapeMask(s, g.gate.shape);
   const out = new Uint8Array(s.data.n);
@@ -219,10 +230,10 @@ function gateMask(s: MockSample, gateId: string | null): Uint8Array {
 
 const countMask = (m: Uint8Array) => m.reduce((a, b) => a + b, 0);
 
-function preorder(): GateNode[] {
-  const out: GateNode[] = [];
+function preorderOf<T extends GateNode>(nodes: T[]): T[] {
+  const out: T[] = [];
   const walk = (p: string | null) =>
-    ws.gates.filter((g) => g.parent === p).forEach((g) => (out.push(g), walk(g.id)));
+    nodes.filter((g) => g.parent === p).forEach((g) => (out.push(g), walk(g.id)));
   walk(null);
   return out;
 }
@@ -234,7 +245,7 @@ function populationStats(sid: string): PopulationStats[] {
   const rows: PopulationStats[] = [{
     gate_id: null, name: "All events", count: total, parent_count: total, total, pct_parent: 100, pct_total: 100,
   }];
-  for (const g of preorder()) {
+  for (const g of preorderOf(treeOf(sid))) {
     const c = countMask(gateMask(s, g.id));
     counts.set(g.id, c);
     const pc = counts.get(g.parent) ?? total;
@@ -282,7 +293,7 @@ function plotHist(sid: string, gid: string | null, x: GateDim, bins: number): Hi
     total++;
     counts[Math.min(bins - 1, Math.floor(((v[i] - D0) / (D1 - D0)) * bins))]++;
   }
-  return { bins, counts, max_count: Math.max(0, ...counts), total, range: [D0, D1], ticks: ticksFor(tf(x.channel)), label: label(x) };
+  return { bins, counts, max_count: Math.max(0, ...counts), total, range: [D0, D1], ticks: ticksFor(tf(x.channel, sid)), label: label(x) };
 }
 
 function plot2d(sid: string, gid: string | null, x: GateDim, y: GateDim, bins: number, maxPoints: number): ArrayBuffer {
@@ -303,7 +314,7 @@ function plot2d(sid: string, gid: string | null, x: GateDim, y: GateDim, bins: n
   const pick: number[] = [];
   for (let k = 0; k < idx.length && pick.length < maxPoints; k += stride) pick.push(idx[Math.floor(k)]);
   const header = new TextEncoder().encode(JSON.stringify({
-    x_label: label(x), y_label: label(y), x_ticks: ticksFor(tf(x.channel)), y_ticks: ticksFor(tf(y.channel)),
+    x_label: label(x), y_label: label(y), x_ticks: ticksFor(tf(x.channel, sid)), y_ticks: ticksFor(tf(y.channel, sid)),
     total: idx.length, max_count: maxCount, bins,
   }));
   const n = pick.length;
@@ -326,27 +337,184 @@ function plot2d(sid: string, gid: string | null, x: GateDim, y: GateDim, bins: n
   return buf;
 }
 
-function remapGates(ch: string, from: Transform, to: Transform): void {
+function remapShape(sh: GateShape, ch: string, from: Transform, to: Transform): void {
   const r = (v: number) => fwd(to, inv(from, v));
-  for (const g of ws.gates) {
-    const sh = g.gate.shape;
-    if (sh.type === "boolean") continue;
-    sh.dims.forEach((d, k) => {
-      if (d.channel !== ch) return;
-      if (sh.type === "rectangle") {
-        const lo = sh.min[k], hi = sh.max[k];
-        if (lo !== null) sh.min[k] = r(lo);
-        if (hi !== null) sh.max[k] = r(hi);
-      } else if (sh.type === "polygon") sh.vertices.forEach((v) => (v[k] = r(v[k])));
-      else sh.center[k] = r(sh.center[k]);
-    });
+  if (sh.type === "boolean") return;
+  sh.dims.forEach((d, k) => {
+    if (d.channel !== ch) return;
+    if (sh.type === "rectangle") {
+      const lo = sh.min[k], hi = sh.max[k];
+      if (lo !== null) sh.min[k] = r(lo);
+      if (hi !== null) sh.max[k] = r(hi);
+    } else if (sh.type === "polygon") sh.vertices.forEach((v) => (v[k] = r(v[k])));
+    else sh.center[k] = r(sh.center[k]);
+  });
+}
+
+// ---------------------------------------------------------------- groups & per-sample trees
+
+const ALL = "all";
+const groupOf = (id: string): Group => {
+  const g = ws.groups.find((x) => x.id === id);
+  if (!g) throw `group not found: ${id}`;
+  return g;
+};
+const treeOf = (sid: string): SampleGateNode[] => {
+  const t = ws.sample_gates[sid];
+  if (!t) throw `unknown sample ${sid}`;
+  return t;
+};
+const hasOverride = (sid: string, ch: string) => !!ws.sample_channel_settings[sid]?.[ch];
+const dimsOf = (shape: GateShape): GateDim[] => (shape.type === "boolean" ? [] : shape.dims);
+
+/** Re-express a shape between the default space and a sample's space. */
+function convert(sid: string, shape: GateShape, toSample: boolean): GateShape {
+  const out = clone(shape);
+  for (const ch of new Set(dimsOf(shape).map((d) => d.channel))) {
+    if (!hasOverride(sid, ch)) continue;
+    const [from, to] = toSample ? [tf(ch), tf(ch, sid)] : [tf(ch, sid), tf(ch)];
+    remapShape(out, ch, from, to);
   }
+  return out;
+}
+
+function subtree(nodes: GateNode[], id: string): Set<string> {
+  const kill = new Set([id]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const g of nodes) if (g.parent && kill.has(g.parent) && !kill.has(g.id)) (kill.add(g.id), (grew = true));
+  }
+  return kill;
+}
+
+/** Copy a template node into a sample unless it has it already or lacks the parent. */
+function insertCopy(sid: string, node: GateNode): void {
+  const tree = ws.sample_gates[sid];
+  if (!tree || tree.some((n) => n.id === node.id)) return;
+  if (node.parent && !tree.some((n) => n.id === node.parent)) return;
+  tree.push({ ...clone(node), gate: { ...clone(node.gate), shape: convert(sid, node.gate.shape, true) }, tailored: false });
+}
+
+function scopedAdd(scope: GateScope | undefined, name: string, parent: string | null, shape: GateShape, negate: boolean, color: string | null = null): string {
+  const sc = scope ?? { group: ALL };
+  const id = `g${idCounter++}`;
+  const node: GateNode = { id, name, parent, gate: { shape: clone(shape), negate }, color };
+  if ("group" in sc) {
+    const g = groupOf(sc.group);
+    if (parent && !g.gates.some((x) => x.id === parent)) throw `gate not found: ${parent}`;
+    g.gates.push(node);
+    g.sample_ids.forEach((sid) => insertCopy(sid, node));
+  } else {
+    const tree = treeOf(sc.sample);
+    if (parent && !tree.some((x) => x.id === parent)) throw `gate not found: ${parent}`;
+    tree.push({ ...node, tailored: true });
+  }
+  return id;
+}
+
+interface Patch { shape?: GateShape; name?: string; negate?: boolean; color?: string | null }
+function patchNode(g: GateNode, p: Patch): void {
+  if (p.shape !== undefined) g.gate.shape = clone(p.shape);
+  if (p.name !== undefined) g.name = p.name;
+  if (p.negate !== undefined) g.gate.negate = Boolean(p.negate);
+  if (p.color !== undefined) g.color = p.color ?? null;
+}
+
+function scopedUpdate(scope: GateScope | undefined, id: string, p: Patch): void {
+  const sc = scope ?? { group: ALL };
+  if ("group" in sc) {
+    const g = groupOf(sc.group);
+    const t = g.gates.find((x) => x.id === id);
+    if (!t) throw `gate not found: ${id}`;
+    patchNode(t, p);
+    for (const sid of g.sample_ids) {
+      const n = ws.sample_gates[sid]?.find((x) => x.id === id);
+      if (!n) continue;
+      if (n.tailored) patchNode(n, { name: p.name, color: p.color });
+      else patchNode(n, { ...p, shape: p.shape ? convert(sid, p.shape, true) : undefined });
+    }
+  } else {
+    const n = treeOf(sc.sample).find((x) => x.id === id);
+    if (!n) throw `gate not found: ${id}`;
+    if (p.shape !== undefined || (p.negate !== undefined && p.negate !== n.gate.negate) || (p.name !== undefined && p.name !== n.name)) n.tailored = true;
+    patchNode(n, p);
+  }
+}
+
+function scopedRemove(scope: GateScope | undefined, id: string): void {
+  const sc = scope ?? { group: ALL };
+  if ("group" in sc) {
+    const g = groupOf(sc.group);
+    if (!g.gates.some((x) => x.id === id)) throw `gate not found: ${id}`;
+    const kill = subtree(g.gates, id);
+    g.gates = g.gates.filter((x) => !kill.has(x.id));
+    for (const sid of g.sample_ids) {
+      const tree = ws.sample_gates[sid];
+      if (!tree?.some((x) => x.id === id)) continue;
+      const k = subtree(tree, id);
+      ws.sample_gates[sid] = tree.filter((x) => !k.has(x.id));
+    }
+  } else {
+    const tree = treeOf(sc.sample);
+    if (!tree.some((x) => x.id === id)) throw `gate not found: ${id}`;
+    const k = subtree(tree, id);
+    ws.sample_gates[sc.sample] = tree.filter((x) => !k.has(x.id));
+  }
+}
+
+function copyToGroup(gateId: string, sid: string, groupId: string): void {
+  const g = groupOf(groupId);
+  const src = treeOf(sid).find((x) => x.id === gateId);
+  if (!src) throw `gate not found: ${gateId}`;
+  const node: GateNode = { id: src.id, name: src.name, parent: src.parent, color: src.color, gate: { ...clone(src.gate), shape: convert(sid, src.gate.shape, false) } };
+  const t = g.gates.find((x) => x.id === gateId);
+  if (t) Object.assign(t, clone(node));
+  else {
+    if (node.parent && !g.gates.some((x) => x.id === node.parent)) throw `the parent population of ${node.name} is not in group ${g.name}`;
+    g.gates.push(clone(node));
+  }
+  for (const m of new Set([...g.sample_ids, sid])) {
+    const tree = ws.sample_gates[m];
+    if (!tree) continue;
+    const n = tree.find((x) => x.id === gateId);
+    if (n) {
+      n.name = node.name;
+      n.color = node.color;
+      n.gate = { ...clone(node.gate), shape: convert(m, node.gate.shape, true) };
+      n.tailored = false;
+    } else insertCopy(m, node);
+  }
+}
+
+function setMembers(groupId: string, ids: string[]): void {
+  if (groupId === ALL) throw "the All Samples group always contains every sample";
+  const g = groupOf(groupId);
+  const added = ids.filter((s) => !g.sample_ids.includes(s));
+  g.sample_ids = [...new Set(ids)].filter((s) => ws.samples.some((x) => x.id === s));
+  for (const sid of added) for (const n of preorderOf(g.gates)) insertCopy(sid, n);
+}
+
+function setTransform(ch: string, t: Transform, sid: string | null): void {
+  if (sid) {
+    if (!ws.sample_gates[sid]) throw `unknown sample ${sid}`;
+    const old = tf(ch, sid);
+    const isDefault = JSON.stringify(t) === JSON.stringify(tf(ch));
+    if (isDefault) delete ws.sample_channel_settings[sid]?.[ch];
+    else (ws.sample_channel_settings[sid] ??= {})[ch] = { transform: clone(t) };
+    ws.sample_gates[sid].forEach((g) => remapShape(g.gate.shape, ch, old, t));
+    return;
+  }
+  const old = tf(ch);
+  ws.groups.forEach((g) => g.gates.forEach((n) => remapShape(n.gate.shape, ch, old, t)));
+  for (const s of ws.samples) if (!hasOverride(s.id, ch)) ws.sample_gates[s.id]?.forEach((n) => remapShape(n.gate.shape, ch, old, t));
+  ws.channel_settings[ch] = { transform: clone(t) };
 }
 
 // ---------------------------------------------------------------- dispatch
 
 type Args = Record<string, unknown>;
-const view = () => clone(ws);
+const view = () => clone({ ...ws, gates: ws.groups[0]?.gates ?? [] });
 
 function dispatch(cmd: string, a: Args): unknown {
   const str = (k: string) => a[k] as string;
@@ -364,14 +532,18 @@ function dispatch(cmd: string, a: Args): unknown {
       };
     }
     case "sample_add": { const errors = addSamples(a.paths as string[]); return { workspace: view(), errors }; }
-    case "sample_remove": samples.delete(str("sampleId")); ws.samples = ws.samples.filter((s) => s.id !== str("sampleId")); ws.loaded = ws.loaded.filter((s) => s !== str("sampleId")); return view();
-    case "sample_keywords": return { ...(getSample(str("sampleId")) as MockSample & { fullKeywords: Record<string, string> }).fullKeywords };
-    case "channel_set_transform": {
-      const t = a.transform as Transform;
-      remapGates(str("channel"), tf(str("channel")), t);
-      ws.channel_settings[str("channel")] = { transform: clone(t) };
+    case "sample_remove": {
+      const sid = str("sampleId");
+      samples.delete(sid);
+      ws.samples = ws.samples.filter((s) => s.id !== sid);
+      ws.loaded = ws.loaded.filter((s) => s !== sid);
+      ws.groups.forEach((g) => (g.sample_ids = g.sample_ids.filter((s) => s !== sid)));
+      delete ws.sample_gates[sid];
+      delete ws.sample_channel_settings[sid];
       return view();
     }
+    case "sample_keywords": return { ...(getSample(str("sampleId")) as MockSample & { fullKeywords: Record<string, string> }).fullKeywords };
+    case "channel_set_transform": setTransform(str("channel"), a.transform as Transform, (a.sampleId as string | undefined) ?? null); return view();
     case "channel_default_transform": {
       const p = getSample(str("sampleId")).data.params.find((x) => x.name === str("channel"));
       return defaultTransform(a.kind as TransformKind, p?.range ?? 262144);
@@ -379,41 +551,40 @@ function dispatch(cmd: string, a: Args): unknown {
     case "compensation_set": ws.compensation = clone(a.comp as CompSource); return view();
     case "compensation_matrix": return clone(effectiveMatrix(getSample(str("sampleId"))));
     case "gate_add": {
-      const id = addGate(str("name"), (a.parent as string | null) ?? null, clone(a.shape as GateShape));
-      ws.gates[ws.gates.length - 1].gate.negate = Boolean(a.negate);
+      const id = scopedAdd(a.scope as GateScope | undefined, str("name"), (a.parent as string | null) ?? null, a.shape as GateShape, Boolean(a.negate));
       return { id, workspace: view() };
     }
-    case "gate_update": {
-      const g = ws.gates.find((x) => x.id === str("gateId"));
-      if (!g) throw `unknown gate ${str("gateId")}`;
-      if (a.shape !== undefined) g.gate.shape = clone(a.shape as GateShape);
-      if (a.name !== undefined) g.name = str("name");
-      if (a.negate !== undefined) g.gate.negate = Boolean(a.negate);
-      if (a.color !== undefined) g.color = (a.color as string | null) ?? null;
-      return view();
+    case "gate_update": scopedUpdate(a.scope as GateScope | undefined, str("gateId"), a as Patch); return view();
+    case "gate_remove": scopedRemove(a.scope as GateScope | undefined, str("gateId")); return view();
+    case "gate_copy_to_group": copyToGroup(str("gateId"), str("fromSampleId"), str("groupId")); return view();
+    case "group_list": return clone(ws.groups);
+    case "group_create": {
+      const name = str("name").trim();
+      if (!name) throw "group name must not be empty";
+      const id = `grp${idCounter++}`;
+      ws.groups.push({ id, name, sample_ids: [], gates: [] });
+      setMembers(id, a.sampleIds as string[]);
+      return { id, workspace: view() };
     }
-    case "gate_remove": {
-      const kill = new Set([str("gateId")]);
-      let grew = true;
-      while (grew) {
-        grew = false;
-        for (const g of ws.gates) if (g.parent && kill.has(g.parent) && !kill.has(g.id)) (kill.add(g.id), (grew = true));
-      }
-      ws.gates = ws.gates.filter((g) => !kill.has(g.id));
+    case "group_set_members": setMembers(str("groupId"), a.sampleIds as string[]); return view();
+    case "group_remove": {
+      if (str("groupId") === ALL) throw "the All Samples group cannot be removed";
+      groupOf(str("groupId"));
+      ws.groups = ws.groups.filter((g) => g.id !== str("groupId"));
       return view();
     }
     case "population_stats": return populationStats(str("sampleId"));
     case "channel_stats": return channelStats(str("sampleId"), a.gateId as string | null, str("channel"), Boolean(a.compensated));
-    case "axis_ticks": return ticksFor(tf(str("channel")));
+    case "axis_ticks": return ticksFor(tf(str("channel"), (a.sampleId as string | undefined) ?? null));
     case "plot_hist": return plotHist(str("sampleId"), a.gateId as string | null, a.x as GateDim, a.bins as number);
     case "plot_2d": return plot2d(str("sampleId"), a.gateId as string | null, a.x as GateDim, a.y as GateDim, a.bins as number, a.maxPoints as number);
     case "export_population_csv": return countMask(gateMask(getSample(str("sampleId")), a.gateId as string | null));
-    case "export_stats_csv": return ws.samples.length * (ws.gates.length + 1);
+    case "export_stats_csv": return ws.samples.reduce((n, s) => n + (ws.sample_gates[s.id]?.length ?? 0) + 1, 0);
     default: throw `unknown command ${cmd}`;
   }
 }
 
-const MUTATING = /^(workspace_(new|open|import_wsp)|sample_(add|remove)|channel_set_transform|compensation_set|gate_(add|update|remove))$/;
+const MUTATING = /^(workspace_(new|open|import_wsp)|sample_(add|remove)|channel_set_transform|compensation_set|gate_(add|update|remove|copy_to_group)|group_(create|set_members|remove))$/;
 
 export async function mockInvoke<T>(cmd: string, args: Args = {}): Promise<T> {
   if (!ws) demoWorkspace();

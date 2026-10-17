@@ -1,7 +1,10 @@
 // User-level actions shared by the toolbar, menus and keyboard shortcuts.
 import { api } from "../ipc";
 import { GATE_COLORS } from "../plot/colormap";
-import { applyWorkspace, gate, isLoaded, selectPopulation, state } from "../state";
+import {
+  applyWorkspace, currentScope, gate, groupById, groupsOf, isLoaded, sampleGate, sampleGates, selectPopulation, state,
+} from "../state";
+import { ALL_SAMPLES, type GateNode, type GateScope } from "../types";
 import { h } from "./dom";
 import { dirname, pickDir, pickOpen, pickSave } from "./files";
 import { alertBox, confirmBox, modal, popover, promptText } from "./modal";
@@ -107,43 +110,100 @@ export const removeSample = (id: string) => run(async () => {
 
 // ---------------------------------------------------------------- gates
 
-export const renameGate = (id: string) => run(async () => {
-  const g = gate(id);
+// Every gate helper takes an optional `scope` (default: `currentScope()`, i.e.
+// the selected group, or the selected sample, which then becomes tailored).
+
+/** Human-readable target of a scope, for status messages. */
+function scopeLabel(scope: GateScope): string {
+  if ("group" in scope) return `group ${groupById(scope.group)?.name ?? scope.group}`;
+  return state.ws?.samples.find((s) => s.id === scope.sample)?.name ?? scope.sample;
+}
+
+/** The gate as seen in a scope's tree. */
+function gateIn(id: string, scope: GateScope): GateNode | null {
+  if ("group" in scope) return groupById(scope.group)?.gates.find((g) => g.id === id) ?? null;
+  return sampleGate(id, scope.sample);
+}
+
+export const renameGate = (id: string, scope: GateScope = currentScope()) => run(async () => {
+  const g = gateIn(id, scope) ?? gate(id);
   if (!g) return;
   const name = await promptText("Rename population", "Name", g.name);
-  if (name && name !== g.name) await applyWorkspace(await api.gateUpdate(id, { name }));
+  if (name && name !== g.name) await applyWorkspace(await api.gateUpdate(id, { name }, scope));
 });
 
-export const deleteGate = (id: string) => run(async () => {
-  const g = gate(id);
+export const deleteGate = (id: string, scope: GateScope = currentScope()) => run(async () => {
+  const g = gateIn(id, scope) ?? gate(id);
   if (!g) return;
-  const kids = state.ws?.gates.filter((x) => x.parent === id).length ?? 0;
-  const msg = kids ? `Delete “${g.name}” and all of its sub-populations?` : `Delete “${g.name}”?`;
+  const tree = "group" in scope ? groupById(scope.group)?.gates ?? [] : sampleGates(scope.sample);
+  const kids = tree.filter((x) => x.parent === id).length;
+  const where = "group" in scope ? ` from ${scopeLabel(scope)} and all of its samples` : ` from ${scopeLabel(scope)} only`;
+  const msg = kids ? `Delete “${g.name}” and all of its sub-populations${where}?` : `Delete “${g.name}”${where}?`;
   if (!(await confirmBox("Delete gate", msg, "Delete", true))) return;
   if (state.gateId === id) selectPopulation(g.parent);
-  await applyWorkspace(await api.gateRemove(id));
+  await applyWorkspace(await api.gateRemove(id, scope));
   status.info(`Deleted ${g.name}`);
 });
 
-export const toggleNegate = (id: string) => run(async () => {
-  const g = gate(id);
-  if (g) await applyWorkspace(await api.gateUpdate(id, { negate: !g.gate.negate }));
+export const toggleNegate = (id: string, scope: GateScope = currentScope()) => run(async () => {
+  const g = gateIn(id, scope) ?? gate(id);
+  if (g) await applyWorkspace(await api.gateUpdate(id, { negate: !g.gate.negate }, scope));
 });
 
-export const setGateColor = (id: string, color: string | null) => run(async () => {
-  await applyWorkspace(await api.gateUpdate(id, { color }));
+export const setGateColor = (id: string, color: string | null, scope: GateScope = currentScope()) => run(async () => {
+  await applyWorkspace(await api.gateUpdate(id, { color }, scope));
 });
 
-export function chooseColor(id: string, anchor: HTMLElement): void {
-  const g = gate(id);
+export function chooseColor(id: string, anchor: HTMLElement, scope: GateScope = currentScope()): void {
+  const g = gateIn(id, scope) ?? gate(id);
   const custom = h("input", { type: "color", value: g?.color ?? GATE_COLORS[0] });
   let close = () => {};
-  custom.addEventListener("change", () => (close(), setGateColor(id, custom.value)));
+  custom.addEventListener("change", () => (close(), setGateColor(id, custom.value, scope)));
   const grid = h("div", { class: "swatches" },
-    ...GATE_COLORS.map((c) => h("button", { class: "swatch", style: `background:${c}`, title: c, onclick: () => (close(), setGateColor(id, c)) })),
-    h("button", { class: "swatch none", title: "Automatic", text: "×", onclick: () => (close(), setGateColor(id, null)) }));
+    ...GATE_COLORS.map((c) => h("button", { class: "swatch", style: `background:${c}`, title: c, onclick: () => (close(), setGateColor(id, c, scope)) })),
+    h("button", { class: "swatch none", title: "Automatic", text: "×", onclick: () => (close(), setGateColor(id, null, scope)) }));
   close = popover(anchor, h("div", { class: "color-pop" }, grid, h("label", { class: "field-inline" }, "Custom ", custom)));
 }
+
+/**
+ * "Apply to group": push a sample's (tailored) gate to one of the sample's
+ * groups; every member's copy is reset to it.
+ */
+export const applyToGroup = (gateId: string, sampleId: string | null = state.sampleId, groupId?: string) => run(async () => {
+  if (!sampleId) return;
+  const g = sampleGate(gateId, sampleId);
+  if (!g) return status.error("This population is not in the selected sample");
+  const groups = groupsOf(sampleId);
+  let target = groupId ?? null;
+  if (!target) {
+    // Prefer a group whose template already has this gate (or its parent).
+    const fits = groups.filter((x) => x.gates.some((t) => t.id === gateId || t.id === g.parent) || !g.parent);
+    if (!fits.length) return status.error(`No group of this sample contains the parent population of “${g.name}”`);
+    if (fits.length === 1) target = fits[0].id;
+    else {
+      const sel = h("select", { class: "input" }, ...fits.map((x) => h("option", { value: x.id, text: `${x.name} (${x.sample_ids.length} samples)` })));
+      const pre = fits.find((x) => x.id !== ALL_SAMPLES && x.gates.some((t) => t.id === gateId)) ?? fits.find((x) => x.gates.some((t) => t.id === gateId));
+      if (pre) sel.value = pre.id;
+      const body = h("div", { class: "form" },
+        h("p", { text: `Copy “${g.name}” from this sample to a group. Every sample of the group will use this gate.` }),
+        h("label", { class: "field" }, h("span", { text: "Group" }), sel));
+      if ((await modal("Apply to group", body, [{ label: "Cancel", value: "c" }, { label: "Apply", value: "ok", primary: true }], { onEnter: "ok" })) !== "ok") return;
+      target = sel.value;
+    }
+  }
+  await applyWorkspace(await api.gateCopyToGroup(gateId, sampleId, target));
+  status.ok(`Applied “${g.name}” to ${scopeLabel({ group: target })}`);
+});
+
+// ---------------------------------------------------------------- groups
+
+export const deleteGroup = (groupId: string) => run(async () => {
+  const g = groupById(groupId);
+  if (!g || g.id === ALL_SAMPLES) return;
+  if (!(await confirmBox("Delete group", `Delete the group “${g.name}”? Its samples keep their gates.`, "Delete", true))) return;
+  await applyWorkspace(await api.groupRemove(groupId));
+  status.info(`Deleted group ${g.name}`);
+});
 
 export async function showAbout(): Promise<void> {
   await alertBox("CytoFlow", "Open-source flow cytometry analysis. Gates are stored in display space; transforms remap them automatically.");
