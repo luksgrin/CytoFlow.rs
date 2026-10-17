@@ -21,13 +21,16 @@ code or assets derived from any commercial product.
   logicle width estimation and editable parameters. Changing a scale re-maps
   existing gates so they keep their meaning.
 * **Compensation**: from the file's own matrix, none, or a custom editable matrix.
-* **Gating**: rectangle, range, polygon, ellipse, quadrant and Boolean (and / or /
+* **Gating**: rectangle, range, polygon, ellipse, linked quadrant and Boolean (and / or /
   not) gates in a population hierarchy. Sample groups carry template gate trees
   (the built-in "All Samples" group contains every sample); each sample owns its
   own tree, which can be tailored per sample and pushed back to a group.
   Transforms can be overridden per sample.
 * **Plots**: pseudo-colour dot plot, density, contour and histogram, with
-  proper decade tick marks on log-like axes; a batch grid across samples.
+  proper decade tick marks on log-like axes; overlays of several populations
+  or samples; a batch grid across samples; copy-as-PNG.
+* **Layout editor**: arrange plots, histograms and statistics tables on an
+  A4/Letter page, re-rendered from live data, exported as PNG or SVG.
 * **Statistics**: count, % of parent, % of total, per-channel mean / median /
   CV / SD / geometric mean; CSV export of populations and statistics tables.
 * **FlowJo `.wsp` import**: samples, per-sample transforms, compensation matrix,
@@ -69,7 +72,12 @@ open target/release/bundle/macos/CytoFlow.app --args /path/to/sample.fcs /path/t
 ## Status
 
 Early but usable. The engine is validated against the Gating-ML 2.0 compliance
-fixtures and against population counts stored in FlowJo workspaces. See
+fixtures (exact per-event agreement), against a FlowJo-exported biexponential
+lookup table, and against population counts stored in FlowJo workspaces (exact
+for rectangle, quadrant and biex/linear-axis gates; within 0.1 % for polygons
+on logicle axes; the ellipse-on-logicle convention is still 2–3 % off, see the
+test comments). Known gaps: the app bundle is unsigned, and layouts are kept in
+the browser store rather than in the workspace file. See
 `docs/ipc.md` for the command surface, and open an issue for missing features.
 
 ## License
