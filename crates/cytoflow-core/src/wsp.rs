@@ -152,6 +152,10 @@ fn dim_name(e: &Element) -> Option<String> {
     e.child("fcs-dimension").and_then(|d| d.attr("name")).map(String::from)
 }
 
+/// FlowJo's display grid (cells per axis) used by the edge-of-axis rule of
+/// imported rectangle gates; see the `"RectangleGate"` arm of `convert_gate`.
+const RECT_EDGE_GRID: f64 = 256.0;
+
 struct CoordMap {
     transform: Transform,
     scale: f64,
@@ -197,12 +201,28 @@ impl TreeCtx<'_> {
                 if dim_els.len() != dims.len() || dims.is_empty() {
                     return None;
                 }
+                // FlowJo edge-of-axis rule (FlowJo import only; rectangles
+                // drawn in the app or read from Gating-ML keep their exact
+                // bounds): membership is tested on the exact display values
+                // with the half-open `min ≤ x < max`, except that a bound
+                // lying within the first (last) cell of the 256-step display
+                // grid (or beyond the axis), i.e. a gate drawn to the edge of
+                // the axis, is open. Evidence (tests/wsp_rect_edge.rs): the
+                // E01 `Time` gate's minimum sits 0.02 cells above the axis
+                // minimum and FlowJo counts all events, including the 2 below
+                // it; in E05 the same minimum sits 1.035 cells up and FlowJo
+                // excludes the 357 events below it (17 of them in the same
+                // cell). Evaluating rectangles on the grid instead
+                // (events and/or bounds snapped by round/floor/ceil) breaks
+                // the exact Time, quadrant and biex-rectangle counts by tens
+                // to thousands of events.
+                let edge = 1.0 / RECT_EDGE_GRID;
                 let mut min = Vec::new();
                 let mut max = Vec::new();
                 for (k, d) in dim_els.iter().enumerate() {
                     let tr = self.transform(&dims[k].0);
-                    min.push(d.attr_f64("min").map(|v| tr.apply(v)));
-                    max.push(d.attr_f64("max").map(|v| tr.apply(v)));
+                    min.push(d.attr_f64("min").map(|v| tr.apply(v)).filter(|v| *v >= edge));
+                    max.push(d.attr_f64("max").map(|v| tr.apply(v)).filter(|v| *v <= 1.0 - edge));
                 }
                 Some((GateShape::Rectangle { dims: dims.iter().map(gd).collect(), min, max }, negate, None))
             }

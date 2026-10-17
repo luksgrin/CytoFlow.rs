@@ -178,17 +178,13 @@ fn ics_simple_polygons_rectangles_logicle_comp() {
     // With it the Time rectangle of E03 and E05 is exact (E05 was 22 events
     // short when the template sample's gain was shared). In E01 the gate
     // minimum (1.28 s) sits 7.9e-5 display units above the axis minimum,
-    // inside FlowJo's first display bin, and FlowJo also counts the 2 events
-    // below it: an edge-of-axis rule of the rectangle gate, not a transform
-    // issue.
+    // inside FlowJo's first display cell, and FlowJo also counts the 2 events
+    // below it: the importer's edge-of-axis rule opens such a bound, which
+    // makes E01 exact too (see tests/wsp_rect_edge.rs).
     let time: Vec<&Row> = rows.iter().filter(|r| r.path == "Time").collect();
     assert_eq!(time.len(), loaded);
     for r in time {
-        if r.sample.contains("E01_008") {
-            assert!(r.got.abs_diff(r.expected) <= 2, "[{wsp}] {} Time: {} vs {}", r.sample, r.got, r.expected);
-        } else {
-            assert_eq!(r.got, r.expected, "[{wsp}] {} Time", r.sample);
-        }
+        assert_eq!(r.got, r.expected, "[{wsp}] {} Time", r.sample);
     }
 }
 
