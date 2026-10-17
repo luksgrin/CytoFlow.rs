@@ -155,9 +155,20 @@ jobs:
         run: cargo install tauri-cli --version "^2" --locked
 
       # beforeBuildCommand (npm run build) builds the frontend.
+      # With bundle.createUpdaterArtifacts, Tauri signs every updatable bundle
+      # (macOS .app.tar.gz, Windows .msi / -setup.exe, Linux .AppImage) with the
+      # updater key and writes a .sig next to it; without the key the build fails.
       - name: Build bundles
         shell: bash
-        run: cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::The TAURI_SIGNING_PRIVATE_KEY repository secret is not set; the updater artifacts cannot be signed (see RELEASING.md)."
+            exit 1
+          fi
+          cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
       - name: Collect installers under release names
         shell: bash
@@ -196,16 +207,64 @@ jobs:
       - name: Source archive
         run: git archive --format=tar.gz --prefix="CytoFlow.rs-${VERSION}/" -o release-files/source.tar.gz "$SHA"
 
-      - name: Verify asset list
+      # Updater manifest (Tauri "static JSON" format). The app reads it from
+      # releases/latest/download/latest.json, i.e. from the release marked
+      # "Latest"; pre-releases get none, so they are never offered as updates.
+      - name: Updater manifest (latest.json)
+        if: ${{ !inputs.prerelease }}
         run: |
           set -euo pipefail
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          notes="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+                     -f tag_name="$TAG" -f target_commitish="$SHA" --jq .body 2>/dev/null)" \
+            || notes="CytoFlow ${TAG}: see https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+          entry() { # <asset>
+            jq -n --arg url "$base/$1" --rawfile sig "release-files/$1.sig" '{signature: ($sig | rtrimstr("\n")), url: $url}'
+          }
+          mac_arm="$(entry "CytoFlow_${VERSION}_aarch64.app.tar.gz")"
+          mac_x64="$(entry "CytoFlow_${VERSION}_x64.app.tar.gz")"
+          win_nsis="$(entry "CytoFlow_${VERSION}_x64-setup.exe")"
+          win_msi="$(entry "CytoFlow_${VERSION}_x64_en-US.msi")"
+          linux="$(entry "CytoFlow_${VERSION}_amd64.AppImage")"
+          # The updater looks up "<os>-<arch>-<installer>" first, then "<os>-<arch>",
+          # so MSI installs update with the MSI and NSIS installs with the NSIS setup.
+          jq -n --arg version "$VERSION" --arg notes "$notes" \
+                --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --argjson mac_arm "$mac_arm" --argjson mac_x64 "$mac_x64" \
+                --argjson win_nsis "$win_nsis" --argjson win_msi "$win_msi" --argjson linux "$linux" \
+                '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {
+                    "darwin-aarch64": $mac_arm,
+                    "darwin-x86_64": $mac_x64,
+                    "windows-x86_64": $win_nsis,
+                    "windows-x86_64-nsis": $win_nsis,
+                    "windows-x86_64-msi": $win_msi,
+                    "linux-x86_64": $linux,
+                    "linux-x86_64-appimage": $linux
+                  }}' > release-files/latest.json
+          jq 'del(.notes) | .platforms |= map_values(.url)' release-files/latest.json
+
+      - name: Verify asset list
+        env:
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          manifest="latest.json"
+          [ "$PRERELEASE" = "true" ] && manifest=""
           expected="$(printf '%s\n' \
             "CytoFlow_${VERSION}_aarch64.dmg" \
+            "CytoFlow_${VERSION}_aarch64.app.tar.gz" \
+            "CytoFlow_${VERSION}_aarch64.app.tar.gz.sig" \
             "CytoFlow_${VERSION}_x64.dmg" \
+            "CytoFlow_${VERSION}_x64.app.tar.gz" \
+            "CytoFlow_${VERSION}_x64.app.tar.gz.sig" \
             "CytoFlow_${VERSION}_x64_en-US.msi" \
+            "CytoFlow_${VERSION}_x64_en-US.msi.sig" \
             "CytoFlow_${VERSION}_x64-setup.exe" \
+            "CytoFlow_${VERSION}_x64-setup.exe.sig" \
             "CytoFlow_${VERSION}_amd64.deb" \
             "CytoFlow_${VERSION}_amd64.AppImage" \
+            "CytoFlow_${VERSION}_amd64.AppImage.sig" \
+            $manifest \
             "source.tar.gz" | sort)"
           actual="$(ls -1 release-files | sort)"
           ls -la release-files
@@ -259,6 +318,8 @@ jobs:
             | Linux x64, Debian/Ubuntu | `CytoFlow_${{ needs.validate.outputs.version }}_amd64.deb` |
             | Linux x64, any distribution | `CytoFlow_${{ needs.validate.outputs.version }}_amd64.AppImage` |
             | Source code | `source.tar.gz` |
+
+            The `.app.tar.gz`, `.sig` and `latest.json` files are used by the in-app updater (**⟳ Updates** in the toolbar); you do not need to download them.
 
             ### Installation
 

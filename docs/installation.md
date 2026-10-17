@@ -155,7 +155,25 @@ The status bar at the bottom says **Ready** when the application has connected t
 
 ## Updating
 
-To update to a newer version:
+### In-app updates
+
+CytoFlow can update itself on macOS, Windows and with the Linux AppImage.
+
+- **Automatic check**: about 10 seconds after start-up CytoFlow asks GitHub whether a newer release exists, at most once every 24 hours. Nothing is downloaded without asking.
+- **Manual check**: click **⟳ Updates** at the right end of the toolbar.
+- When an update is available a dialog shows the new version and its release notes, with **Install and restart**, **Later** and **Skip this version**. *Install and restart* downloads the update (with a progress bar), checks its signature, installs it and restarts CytoFlow. *Skip this version* hides that version from the automatic check (the **⟳ Updates** button still shows it); you are told again when a newer one appears.
+- The same dialog has a **Check for updates automatically** checkbox. Untick it to turn the automatic check off; the setting is remembered.
+- If you are up to date, the status bar says "CytoFlow X.Y.Z is up to date".
+
+What is offered:
+
+- Only **full releases**. Pre-releases are never offered in the app.
+- Only versions with the **same major version** as the one you run (for example 1.2 → 1.5, but not 1.x → 2.0). A new major version may change how workspaces or results behave, so the dialog tells you it exists and links to the releases page; install it by hand, as described above, when you are ready.
+- **Debian package (`.deb`)**: the app does not replace files that belong to the package manager. The dialog links to the release; download the new `.deb` and install it with `sudo apt install ./CytoFlow_<new version>_amd64.deb`.
+
+Updates are signed: CytoFlow refuses to install a download whose signature does not match the key built into the app. The installers themselves are still not code-signed by Apple or Microsoft, but an update installed from inside the app usually does not need the Gatekeeper or SmartScreen steps again.
+
+### Updating by hand
 
 1. Download the latest release from GitHub
 2. Follow the installation steps above

@@ -4,11 +4,17 @@
 # does not depend on Tauri's naming rules:
 #
 #   aarch64-apple-darwin      CytoFlow_<ver>_aarch64.dmg
+#                             CytoFlow_<ver>_aarch64.app.tar.gz(.sig)   updater
 #   x86_64-apple-darwin       CytoFlow_<ver>_x64.dmg
-#   x86_64-pc-windows-msvc    CytoFlow_<ver>_x64_en-US.msi
-#                             CytoFlow_<ver>_x64-setup.exe
+#                             CytoFlow_<ver>_x64.app.tar.gz(.sig)       updater
+#   x86_64-pc-windows-msvc    CytoFlow_<ver>_x64_en-US.msi(.sig)
+#                             CytoFlow_<ver>_x64-setup.exe(.sig)
 #   x86_64-unknown-linux-gnu  CytoFlow_<ver>_amd64.deb
-#                             CytoFlow_<ver>_amd64.AppImage
+#                             CytoFlow_<ver>_amd64.AppImage(.sig)
+#
+# The .sig files are the updater signatures Tauri writes next to each
+# updatable bundle when TAURI_SIGNING_PRIVATE_KEY is set
+# (bundle.createUpdaterArtifacts); they must be present.
 #
 # Usage: scripts/collect-bundles.sh <target-triple> <version> <out-dir>
 # Fails if a bundle type is missing or ambiguous (more than one match).
@@ -36,17 +42,25 @@ pick() { # <subdir> <glob> <dest-name>
   echo "collected $out/$3"
 }
 
+# <subdir> <glob> <dest-name>: the bundle plus its updater signature (<bundle>.sig).
+pick_signed() {
+  pick "$1" "$2" "$3"
+  pick "$1" "$2.sig" "$3.sig"
+}
+
 case "$target" in
   aarch64-apple-darwin)
-    pick dmg '*.dmg' "CytoFlow_${ver}_aarch64.dmg" ;;
+    pick dmg '*.dmg' "CytoFlow_${ver}_aarch64.dmg"
+    pick_signed macos '*.app.tar.gz' "CytoFlow_${ver}_aarch64.app.tar.gz" ;;
   x86_64-apple-darwin)
-    pick dmg '*.dmg' "CytoFlow_${ver}_x64.dmg" ;;
+    pick dmg '*.dmg' "CytoFlow_${ver}_x64.dmg"
+    pick_signed macos '*.app.tar.gz' "CytoFlow_${ver}_x64.app.tar.gz" ;;
   x86_64-pc-windows-msvc)
-    pick msi '*.msi' "CytoFlow_${ver}_x64_en-US.msi"
-    pick nsis '*-setup.exe' "CytoFlow_${ver}_x64-setup.exe" ;;
+    pick_signed msi '*.msi' "CytoFlow_${ver}_x64_en-US.msi"
+    pick_signed nsis '*-setup.exe' "CytoFlow_${ver}_x64-setup.exe" ;;
   x86_64-unknown-linux-gnu)
     pick deb '*.deb' "CytoFlow_${ver}_amd64.deb"
-    pick appimage '*.AppImage' "CytoFlow_${ver}_amd64.AppImage"
+    pick_signed appimage '*.AppImage' "CytoFlow_${ver}_amd64.AppImage"
     chmod +x "$out/CytoFlow_${ver}_amd64.AppImage" ;;
   *)
     echo "::error::unsupported target $target" >&2; exit 1 ;;

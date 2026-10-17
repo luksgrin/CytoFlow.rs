@@ -156,6 +156,13 @@ cargo tauri build
 
 `cargo tauri build` runs `npm run build` first (the `beforeBuildCommand`), then compiles the release binary and creates every bundle type available on the platform. The bundles are in `target/release/bundle/`.
 
+!!! note "Updater signing key"
+    The configuration also asks for signed in-app update bundles (`bundle.createUpdaterArtifacts`), which need the maintainer's private key. Without it the build stops with "A public key has been found, but no private key". Build without the update bundles instead:
+    ```bash
+    cargo tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+    ```
+    See [Releasing](releasing.md#updater-signing-and-latestjson).
+
 ### Build for Specific Platforms
 
 These are the commands the [release workflow](releasing.md) runs.

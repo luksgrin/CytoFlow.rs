@@ -120,6 +120,19 @@ log show --predicate 'process == "cytoflow"' --last 5m
 
 You are looking at the browser preview of the user interface (`npm run dev`), not the desktop application. Its data is synthetic. Start the installed application, or `cargo tauri dev` when developing.
 
+### "Update check failed" / updates are never offered
+
+**⟳ Updates** asks GitHub for `latest.json` of the latest release; the automatic check does the same silently once a day. It can fail when:
+
+- **You are offline**, or a proxy or firewall blocks `github.com` and `objects.githubusercontent.com` (where release files are served from). Try again later or from another network, or update by hand from the [releases page](https://github.com/luksgrin/CytoFlow.rs/releases).
+- **GitHub rate-limits or is unavailable** (an HTTP 403 / 429 / 5xx in the message). Wait a while and try again; the automatic check retries on a later start-up.
+- **The latest release has no `latest.json`** (releases made before in-app updates existed). Nothing is wrong with your installation; update by hand once.
+- **"signature" errors while installing** mean the download did not match the key built into the app (a corrupted download or an altered file). Nothing is installed; try again, or update by hand.
+
+Some updates are deliberately not installed from inside the app: a **new major version**, and any update when CytoFlow was installed from the **`.deb`** package. The dialog links to the releases page instead (see [Updating](installation.md#updating)).
+
+**Turning the automatic check off**: click **⟳ Updates** and untick **Check for updates automatically** in the dialog. The setting is stored per user; the button still works.
+
 ### FCS file won't load
 
 The status bar shows "Open FCS: 1 problem(s) — …" with the reason.
@@ -291,6 +304,16 @@ sudo apt-get install -y \
 ### macOS: Code signing warnings
 
 **Note:** These are normal for local builds and don't prevent the app from running. The release builds are unsigned too.
+
+### "A public key has been found, but no private key"
+
+`tauri.conf.json` enables updater artifacts (`bundle.createUpdaterArtifacts`), so `cargo tauri build` signs them and needs the updater signing key. Without it, build without the updater artifacts:
+
+```bash
+cargo tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+```
+
+The maintainer's release builds get the key from the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` environment variables (see [Releasing](releasing.md#updater-signing-and-latestjson)).
 
 ### "the lock file needs to be updated but --locked was passed"
 
