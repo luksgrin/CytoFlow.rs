@@ -111,3 +111,5 @@ For publication figures with several panels, use the [layout editor](layout.md),
 ## Themes
 
 The theme button at the right end of the toolbar cycles through **Auto** (follows the operating system's light / dark setting), **Light**, **Dim** and **Dark**. The choice is remembered between sessions. Plots, gate labels and the batch view follow the theme; layout pages are always rendered on white paper.
+
+![Dark theme](../img/main-dark.png)
