@@ -6,6 +6,7 @@ use cytoflow_core::compensation::CompMatrix;
 use cytoflow_core::plot;
 use cytoflow_core::stats::ChannelStats;
 use cytoflow_core::workspace::{CompSource, GateScope, Group, Layout, PopulationStats};
+use cytoflow_core::export::ExportFormat;
 use cytoflow_core::{export, wsp, GateDim, GateShape, Transform, TransformKind, Workspace};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -418,6 +419,7 @@ pub async fn plot_hist(
     gate_id: Option<String>,
     x: GateDim,
     bins: usize,
+    range: Option<[f32; 2]>,
 ) -> CmdResult<Value> {
     // Gather cached columns under the lock, bin outside it.
     let (xs, mask, ticks, label) = with_state(app, move |st| {
@@ -428,7 +430,7 @@ pub async fn plot_hist(
     })
     .await?;
     blocking(move || {
-        let h = plot::hist1d(&xs, mask.as_deref().map(|m| m.as_slice()), bins);
+        let h = plot::hist1d(&xs, mask.as_deref().map(|m| m.as_slice()), bins, plot::view_range(range));
         Ok(json!({
             "bins": h.bins,
             "counts": h.counts,
@@ -455,6 +457,8 @@ pub async fn plot_2d(
     y: GateDim,
     bins: usize,
     max_points: usize,
+    x_range: Option<[f32; 2]>,
+    y_range: Option<[f32; 2]>,
 ) -> CmdResult<Response> {
     let (xs, ys, mask, header) = with_state(app, move |st| {
         let ws = &mut st.workspace;
@@ -472,13 +476,15 @@ pub async fn plot_2d(
     .await?;
     blocking(move || {
         let mask = mask.as_deref().map(|m| m.as_slice());
-        let d = plot::density2d(&xs, &ys, mask, bins);
+        let d = plot::density2d(&xs, &ys, mask, bins, plot::view_range(x_range), plot::view_range(y_range));
         let points = plot::pack_points(&xs, &ys, mask, &d, max_points);
         let mut header = header;
         if let Value::Object(m) = &mut header {
             m.insert("total".into(), json!(d.total));
             m.insert("max_count".into(), json!(d.max_count));
             m.insert("bins".into(), json!(d.bins));
+            m.insert("x_range".into(), json!(d.x_range));
+            m.insert("y_range".into(), json!(d.y_range));
         }
         let header = serde_json::to_vec(&header).map_err(err)?;
         let mut out = Vec::with_capacity(12 + header.len() + d.counts.len() * 4 + points.len());
@@ -498,6 +504,7 @@ pub async fn plot_2d(
 // ---------------------------------------------------------------- export
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn export_population_csv(
     app: AppHandle,
     sample_id: String,
@@ -507,12 +514,38 @@ pub async fn export_population_csv(
     compensated: bool,
     transformed: bool,
 ) -> CmdResult<usize> {
-    let (headers, columns, mask) = with_state(app, move |st| {
+    export_population(app, sample_id, gate_id, path, Some(ExportFormat::Csv), channels, compensated, transformed).await
+}
+
+fn comp_description(comp: &CompSource) -> String {
+    match comp {
+        CompSource::None => "none".into(),
+        CompSource::Fcs => "FCS $SPILLOVER keyword of the sample".into(),
+        CompSource::Custom { matrix } => format!("custom matrix over {}", matrix.channels.join(", ")),
+    }
+}
+
+/// Export the events of a population as CSV, XLSX (metadata + data sheets) or Parquet.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn export_population(
+    app: AppHandle,
+    sample_id: String,
+    gate_id: Option<String>,
+    path: String,
+    format: Option<ExportFormat>,
+    channels: Option<Vec<String>>,
+    compensated: bool,
+    transformed: bool,
+) -> CmdResult<usize> {
+    let format = format.unwrap_or_default();
+    let (headers, columns, mask, meta) = with_state(app, move |st| {
         let ws = &mut st.workspace;
         let mask = mask_for(ws, &sample_id, gate_id.as_deref())?;
+        let fcs = ws.fcs(&sample_id).map_err(err)?;
         let channels = match channels {
-            Some(c) => c,
-            None => ws.fcs(&sample_id).map_err(err)?.channel_names(),
+            Some(c) if !c.is_empty() => c,
+            _ => fcs.channel_names(),
         };
         let mut columns = Vec::with_capacity(channels.len());
         for c in &channels {
@@ -524,7 +557,40 @@ pub async fn export_population_csv(
             .map_err(err)?;
             columns.push(col);
         }
-        Ok((channels, columns, mask))
+        let meta = if format == ExportFormat::Csv {
+            export::ExportMeta::default()
+        } else {
+            let sample = ws.samples.iter().find(|s| s.id == sample_id);
+            let population = match &gate_id {
+                Some(g) => ws.gate_path(&sample_id, g),
+                None => "All events".to_string(),
+            };
+            let count = mask.as_ref().map_or(fcs.event_count, |m| m.iter().filter(|&&b| b).count());
+            let mut entries: Vec<(String, String)> = vec![
+                ("sample".into(), sample.map(|s| s.name.clone()).unwrap_or_default()),
+                ("sample_file".into(), sample.map(|s| s.path.display().to_string()).unwrap_or_default()),
+                ("population".into(), population),
+                ("events".into(), count.to_string()),
+                ("sample_events".into(), fcs.event_count.to_string()),
+                ("workspace".into(), ws.name.clone()),
+                ("exported_at".into(), export::iso8601_utc(std::time::SystemTime::now())),
+                ("exported_by".into(), format!("CytoFlow {}", env!("CARGO_PKG_VERSION"))),
+                ("compensation".into(), comp_description(&ws.compensation)),
+                ("compensated".into(), compensated.to_string()),
+                (
+                    "values".into(),
+                    if transformed { "transformed (display space, 0..1 = axis range)" } else { "linear (scale values)" }.into(),
+                ),
+            ];
+            for c in &channels {
+                let t = ws.transform_for(&sample_id, c);
+                entries.push((format!("transform:{c}"), serde_json::to_string(&t).map_err(err)?));
+            }
+            let mut keywords: Vec<(String, String)> = fcs.text.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            keywords.sort_by(|a, b| a.0.cmp(&b.0));
+            export::ExportMeta { entries, keywords }
+        };
+        Ok((channels, columns, mask, meta))
     })
     .await?;
     blocking(move || {
@@ -536,8 +602,17 @@ pub async fn export_population_csv(
             })
             .collect();
         let rows = filtered.first().map_or(0, |c| c.len());
-        let file = File::create(&path).map_err(err)?;
-        export::write_csv(BufWriter::new(file), &headers, &filtered).map_err(err)?;
+        match format {
+            ExportFormat::Csv => {
+                let file = File::create(&path).map_err(err)?;
+                export::write_csv(BufWriter::new(file), &headers, &filtered).map_err(err)?;
+            }
+            ExportFormat::Xlsx => export::write_xlsx(std::path::Path::new(&path), &headers, &filtered, &meta).map_err(err)?,
+            ExportFormat::Parquet => {
+                let file = File::create(&path).map_err(err)?;
+                export::write_parquet(BufWriter::new(file), &headers, &filtered, &meta).map_err(err)?;
+            }
+        }
         Ok(rows)
     })
     .await
