@@ -22,12 +22,12 @@ jobs:
     name: Frontend typecheck + build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Check versions agree
         run: scripts/check-version.sh
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -40,7 +40,7 @@ jobs:
     name: Engine tests + clippy
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Needed by `clippy -p cytoflow` (the Tauri shell links against WebKitGTK).
       - name: Install system dependencies
@@ -58,7 +58,7 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -76,7 +76,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Cache large test fixtures
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: testdata/large
           key: testdata-large-${{ hashFiles('scripts/fetch-testdata.sh') }}
@@ -99,7 +99,7 @@ jobs:
         os: [ubuntu-22.04, macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -117,7 +117,7 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
