@@ -3,7 +3,7 @@
 // workspace file would be the proper long-term home).
 import { api } from "../ipc";
 import type { PlotKind, PlotData } from "../plot/render";
-import { gate, gatePath, isLoaded, state } from "../state";
+import { gate, gatePath, gatePathIn, isLoaded, sampleGates, state } from "../state";
 import type { GateDim, PopulationStats } from "../types";
 
 export type PageSize = "a4" | "letter";
@@ -82,8 +82,9 @@ export function resolvePanel(p: Panel): void {
     const s = ws.samples.find((x) => x.name === p.sampleName);
     if (s) p.sampleId = s.id;
   }
-  if (p.gateId && !gate(p.gateId)) {
-    const g = ws.gates.find((x) => gatePath(x.id) === p.gatePath);
+  const tree = sampleGates(p.sampleId);
+  if (p.gateId && !tree.some((x) => x.id === p.gateId)) {
+    const g = tree.find((x) => gatePathIn(tree, x.id) === p.gatePath);
     p.gateId = g ? g.id : p.gateId;
   }
 }

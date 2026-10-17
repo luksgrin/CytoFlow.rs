@@ -1,6 +1,6 @@
 // X / Y axis pickers, transform selectors and the transform-parameter popover.
 import { api } from "../ipc";
-import { applyWorkspace, channelLabel, compAvailable, isScatterName, on, sample, setAxes, state } from "../state";
+import { applyWorkspace, channelLabel, compAvailable, isScatterName, on, sample, setAxes, state, transformFor } from "../state";
 import type { GateDim, Transform, TransformKind } from "../types";
 import { clear, h } from "./dom";
 import { popover } from "./modal";
@@ -28,8 +28,11 @@ let xc: AxisCtl;
 let yc: AxisCtl;
 
 export function transformOf(ch: string): Transform | null {
-  return state.ws?.channel_settings[ch]?.transform ?? null;
+  return transformFor(ch);
 }
+
+/** Axis edits tailor the plotted sample when a sample is selected, else change the default. */
+const transformTarget = (): string | null => (state.groupId ? null : state.sampleId);
 
 function makeAxis(axis: "x" | "y"): AxisCtl {
   const channel = h("select", { class: "input select", title: `${axis.toUpperCase()} channel` });
@@ -58,7 +61,7 @@ function makeAxis(axis: "x" | "y"): AxisCtl {
     const s = sample();
     if (!d || !s) return;
     const t = await api.channelDefaultTransform(d.channel, kind.value as TransformKind, s.id);
-    await applyWorkspace(await api.channelSetTransform(d.channel, t));
+    await applyWorkspace(await api.channelSetTransform(d.channel, t, transformTarget()));
     status.info(`${d.channel}: ${kind.value} transform`);
   }));
   params.addEventListener("click", () => {
@@ -84,13 +87,13 @@ function openParams(anchor: HTMLElement, ch: string): void {
       nt[k] = v;
     }
     close();
-    await applyWorkspace(await api.channelSetTransform(ch, nt as unknown as Transform));
+    await applyWorkspace(await api.channelSetTransform(ch, nt as unknown as Transform, transformTarget()));
   });
   const reset = () => run(async () => {
     const s = sample();
     if (!s) return;
     close();
-    await applyWorkspace(await api.channelSetTransform(ch, await api.channelDefaultTransform(ch, t.kind, s.id)));
+    await applyWorkspace(await api.channelSetTransform(ch, await api.channelDefaultTransform(ch, t.kind, s.id), transformTarget()));
   });
   const body = h("form", { class: "param-pop", onsubmit: (e: Event) => (e.preventDefault(), apply()) },
     h("div", { class: "pop-title", text: `${ch} — ${t.kind}` }), ...inputs.map((i) => i.row),

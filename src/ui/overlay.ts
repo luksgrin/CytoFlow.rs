@@ -4,7 +4,7 @@ import { api } from "../ipc";
 import { GATE_COLORS } from "../plot/colormap";
 import type { HistNorm, OverlayStyle, Series } from "../plot/overlay";
 import type { PlotData } from "../plot/render";
-import { gate, gatePath, isLoaded, on, state } from "../state";
+import { gate, gatePathIn, isLoaded, on, sampleGates, state } from "../state";
 import type { GateDim } from "../types";
 import { h } from "./dom";
 import { modal } from "./modal";
@@ -98,7 +98,8 @@ export async function openOverlayPicker(): Promise<void> {
   const curSamples = new Set<string>(overlay.items.map((i) => i.sampleId));
   curPops.add(state.gateId ?? "");
   curSamples.add(state.sampleId);
-  const pops = [{ id: "", label: "All events" }, ...ws.gates.map((g) => ({ id: g.id, label: gatePath(g.id) }))];
+  const tree = sampleGates(state.sampleId);
+  const pops = [{ id: "", label: "All events" }, ...tree.map((g) => ({ id: g.id, label: gatePathIn(tree, g.id) }))];
   const popBoxes = pops.map((p) => {
     const cb = h("input", { type: "checkbox", value: p.id, checked: curPops.has(p.id) });
     return { cb, row: h("label", { class: "check-row" }, cb, ` ${p.label}`) };

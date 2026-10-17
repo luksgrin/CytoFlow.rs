@@ -2,7 +2,7 @@
 import { api } from "../ipc";
 import { readTheme, renderPlot, type PlotData } from "../plot/render";
 import { makeFrame, setupCanvas } from "../plot/scale";
-import { emit, gatePath, isLoaded, selectSample, state } from "../state";
+import { emit, gatePath, group, isLoaded, sampleGate, selectSample, state } from "../state";
 import type { PopulationStats } from "../types";
 import { clear, fmtInt, fmtPct, h, pct } from "./dom";
 import { drawGates } from "./gatedraw";
@@ -32,11 +32,14 @@ async function build(): Promise<void> {
     return;
   }
   const yLabel = state.hist ? "Histogram" : y?.channel ?? "";
-  root.append(h("div", { class: "batch-head", text: `${gatePath(state.gateId)} — ${x.channel} × ${yLabel} (${ws.samples.length} samples)` }));
+  // When a group is selected, show only its members.
+  const grp = group();
+  const shown = grp ? ws.samples.filter((s) => grp.sample_ids.includes(s.id)) : ws.samples;
+  root.append(h("div", { class: "batch-head", text: `${gatePath(state.gateId)} — ${x.channel} × ${yLabel} (${shown.length} samples)` }));
   const grid = h("div", { class: "batch-grid" });
   root.append(grid);
   const theme = readTheme();
-  const cells = ws.samples.map((s) => {
+  const cells = shown.map((s) => {
     const canvas = h("canvas");
     const cap = h("div", { class: "batch-cap" }, h("span", { class: "name", text: s.name, title: s.name }), h("span", { class: "num", text: "" }));
     const cell = h("div", {
@@ -57,6 +60,10 @@ async function build(): Promise<void> {
   for (const c of cells) {
     if (my !== seq) return;
     if (!isLoaded(c.s.id)) continue;
+    if (state.gateId && !sampleGate(state.gateId, c.s.id)) {
+      renderPlot(c.ctx, c.frame, null, { kind: state.plotKind }, theme, "No such gate in this sample");
+      continue;
+    }
     try {
       const stats = await api.populationStats(c.s.id);
       let data: PlotData;

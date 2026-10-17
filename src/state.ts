@@ -25,7 +25,7 @@ export interface AppState {
   hist: boolean; // Y axis = Histogram
   plotKind: PlotKind;
   tool: Tool;
-  view: "graph" | "batch";
+  view: "graph" | "batch" | "layout";
   popStats: PopulationStats[]; // for the selected sample
   plotGate: string | null; // gate selected on the plot for editing
 }
@@ -103,6 +103,18 @@ export function channelLabel(name: string, s: SampleInfo | null = sample()): str
 }
 export function shortName(name: string, s: SampleInfo | null = sample()): string {
   return s?.channels.find((c) => c.name === name)?.stain || name;
+}
+
+/** Path of population names within an explicit tree (e.g. one sample's own tree). */
+export function gatePathIn(tree: GateNode[], id: string | null): string {
+  const parts: string[] = [];
+  let g = id ? tree.find((x) => x.id === id) ?? null : null;
+  while (g) {
+    parts.unshift(g.name);
+    const p = g.parent;
+    g = p ? tree.find((x) => x.id === p) ?? null : null;
+  }
+  return parts.length ? parts.join(" / ") : "All events";
 }
 
 /** Path of population names from root, e.g. "Lymphocytes / Single cells". */
