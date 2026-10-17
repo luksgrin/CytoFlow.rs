@@ -6,6 +6,7 @@ import { openCompensation } from "./compensation";
 import { openGroupDialog } from "./dialogs";
 import { h } from "./dom";
 import { cycleTheme, themePref } from "./theme";
+import { updatesButton } from "./updates";
 
 export function initToolbar(root: HTMLElement): void {
   const b = (text: string, title: string, fn: () => unknown, cls = "") => h("button", { class: `tb-btn ${cls}`, text, title, onclick: () => void fn() });
@@ -44,6 +45,7 @@ export function initToolbar(root: HTMLElement): void {
     scopeEl,
     nameEl,
     themeBtn,
+    updatesButton(),
   );
   const upd = () => {
     const ws = state.ws;

@@ -240,3 +240,13 @@ table.grid tr.outside td { color: var(--muted); }
 .scope-pill:empty { display: none; }
 .scope-pill.group { background: var(--accent-soft); color: var(--accent); }
 .scope-pill.sample { background: rgba(217, 119, 6, 0.16); color: #d97706; }
+
+/* in-app updates (src/ui/updates.ts) */
+.update-notes { white-space: pre-wrap; font-size: 12px; max-height: 240px; overflow: auto; border: 1px solid var(--border-soft); border-radius: 6px; padding: 6px 8px; margin: 4px 0 8px; background: var(--panel-2); }
+.update-dialog a { color: var(--accent); }
+.update-auto { display: flex; align-items: center; gap: 6px; font-size: 12px; margin: 10px 0 4px; }
+.update-track { height: 6px; border-radius: 3px; background: var(--border-soft); overflow: hidden; margin: 8px 0 6px; }
+.update-bar { height: 100%; width: 0; background: var(--accent); transition: width 0.15s; }
+.update-bar.indeterminate { width: 30% !important; animation: update-slide 1.2s ease-in-out infinite; }
+@keyframes update-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+.update-progress-label { font-size: 12px; }

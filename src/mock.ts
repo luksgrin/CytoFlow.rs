@@ -639,6 +639,8 @@ function dispatch(cmd: string, a: Args): unknown {
     case "plot_2d": return plot2d(str("sampleId"), a.gateId as string | null, a.x as GateDim, a.y as GateDim, a.bins as number, a.maxPoints as number);
     case "export_population_csv": return countMask(gateMask(getSample(str("sampleId")), a.gateId as string | null));
     case "export_stats_csv": return ws.samples.reduce((n, s) => n + (ws.sample_gates[s.id]?.length ?? 0) + 1, 0);
+    case "update_check": return { available: false, version: null, currentVersion: "0.0.0-mock", notes: null, date: null, skipped: false, reason: null, url: null };
+    case "update_install": throw "updates are not available in the browser preview";
     default: throw `unknown command ${cmd}`;
   }
 }
