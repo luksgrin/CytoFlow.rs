@@ -2,7 +2,8 @@
 import { api } from "../ipc";
 import { GATE_COLORS } from "../plot/colormap";
 import {
-  applyWorkspace, currentScope, gate, groupById, groupsOf, isLoaded, sampleGate, sampleGates, selectPopulation, state,
+  applyWorkspace, currentScope, flushPersistence, gate, groupById, groupsOf, isLoaded, sampleGate, sampleGates,
+  selectPopulation, state,
 } from "../state";
 import { ALL_SAMPLES, type GateNode, type GateScope } from "../types";
 import { h } from "./dom";
@@ -32,17 +33,19 @@ export const openFcs = () => run(async () => {
 export const openWorkspace = () => run(async () => {
   const p = await pickOpen("Open workspace", CFW, false, "/mock/demo.cfw.json");
   if (!p?.[0]) return;
+  await flushPersistence();
   const r = await api.workspaceOpen(p[0]);
   state.gateId = null;
-  await applyWorkspace(r.workspace);
+  await applyWorkspace(r.workspace, { fresh: true });
   reportErrors(r.errors, "Open workspace");
   if (!r.errors.length) status.ok(`Opened ${r.workspace.name}`);
 });
 
 export const newWorkspace = () => run(async () => {
   if (state.ws?.samples.length && !(await confirmBox("New workspace", "Discard the current workspace?", "Discard", true))) return;
+  await flushPersistence();
   state.gateId = null;
-  await applyWorkspace(await api.workspaceNew());
+  await applyWorkspace(await api.workspaceNew(), { fresh: true });
 });
 
 export const saveWorkspace = (saveAs = false) => run(async () => {
@@ -50,14 +53,17 @@ export const saveWorkspace = (saveAs = false) => run(async () => {
   if (saveAs || !path) path = await pickSave("Save workspace", CFW, path ?? `${state.ws?.name || "Untitled"}.cfw.json`);
   if (!path) return;
   if (!/\.json$/i.test(path)) path += ".cfw.json";
+  // Layouts and UI state are written with debounce: send the pending ones first.
+  await flushPersistence();
   await applyWorkspace(await api.workspaceSave(path));
   status.ok(`Saved ${path}`);
 });
 
 async function importWith(path: string, dirs: string[]): Promise<void> {
+  await flushPersistence();
   const r = await api.workspaceImportWsp(path, dirs);
   state.gateId = null;
-  await applyWorkspace(r.workspace);
+  await applyWorkspace(r.workspace, { fresh: true });
   if (r.warnings.length) status.info(`Imported with ${r.warnings.length} warning(s): ${r.warnings.join("; ")}`);
   else status.ok(`Imported ${path}`);
   if (!r.missing.length) return;

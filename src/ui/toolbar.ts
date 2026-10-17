@@ -47,9 +47,11 @@ export function initToolbar(root: HTMLElement): void {
   );
   const upd = () => {
     const ws = state.ws;
-    nameEl.textContent = ws ? `${ws.name || "Untitled"}${ws.path ? "" : " (unsaved)"}` : "";
-    nameEl.title = ws?.path ?? "";
-    document.title = ws?.name ? `${ws.name} — CytoFlow${isTauri ? "" : " (mock)"}` : "CytoFlow";
+    // "(unsaved)": the workspace has no file yet, so layouts / UI state exist only in memory (and a browser draft).
+    const label = ws ? `${ws.name || "Untitled"}${ws.path ? "" : " (unsaved)"}` : "";
+    nameEl.textContent = label;
+    nameEl.title = ws?.path ?? "Not saved to a file yet";
+    document.title = ws ? `${label} — CytoFlow${isTauri ? "" : " (mock)"}` : "CytoFlow";
   };
   on("workspace", upd);
   upd();

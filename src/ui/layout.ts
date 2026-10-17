@@ -1,15 +1,18 @@
-// Layout editor: a printable page of plot / histogram / statistics panels that
-// re-render from live data, with PNG and SVG export.
+// Layout editor: named printable pages of plot / histogram / statistics panels
+// that re-render from live data, with PNG and SVG export. The pages are saved
+// in the workspace (`layouts_set`, debounced); see layoutmodel.ts.
 import "../layout.css";
+import { api } from "../ipc";
 import { savePng, saveSvg } from "../plot/export";
-import { on, state } from "../state";
+import { on, persistLater, setUiState, state, uiState, workspaceGeneration } from "../state";
 import { clear, h } from "./dom";
 import {
-  CAPTION_H, clearPanelCache, emptyLayout, fetchPanel, type Layout, loadLayout, MARGIN, newPanelId, type PageSize,
-  type Panel, type PanelData, pageDims, panelForCurrent, saveLayout, TITLE_H,
+  CAPTION_H, clearPanelCache, emptyLayout, fetchPanel, fromStored, type Layout, loadDraft, MARGIN, type NamedLayout,
+  newLayoutId, newPanelId, nextLayoutName, type PageSize, type Panel, type PanelData, pageDims, panelForCurrent,
+  removeDraft, saveDraft, takeLegacyLayout, TITLE_H, toStored,
 } from "./layoutmodel";
 import { pagePng, pageSvg, panelCaption, panelTitle, renderPanelBody } from "./layoutrender";
-import { confirmBox } from "./modal";
+import { confirmBox, promptText } from "./modal";
 import { run, status } from "./status";
 
 let root: HTMLElement;
@@ -18,12 +21,15 @@ let scroller: HTMLElement;
 let sizeSel: HTMLSelectElement;
 let orientSel: HTMLSelectElement;
 let zoomSel: HTMLSelectElement;
-let layout: Layout = emptyLayout();
-let wsName: string | null = null;
+let layoutSel: HTMLSelectElement;
+let layouts: NamedLayout[] = [{ id: newLayoutId(), name: "Layout 1", data: emptyLayout() }];
+let activeId = layouts[0].id;
+let layout: Layout = layouts[0].data;
+let gen = -1; // workspace generation the layouts were loaded for
+let draftName: string | null = null; // workspace name a browser draft was written under
 let selected: string | null = null;
 let zoom = 0.75;
 let seq = 0;
-let saveTimer = 0;
 let refreshTimer = 0;
 const data = new Map<string, PanelData>();
 const views = new Map<string, { el: HTMLElement; canvas: HTMLCanvasElement; cap1: HTMLElement; cap2: HTMLElement }>();
@@ -45,8 +51,16 @@ export function initLayout(el: HTMLElement): void {
   zoomSel.value = String(zoom);
   pageEl = h("div", { class: "lp-page", onpointerdown: (e: Event) => e.target === pageEl && select(null) });
   scroller = h("div", { class: "lp-scroll" }, h("div", { class: "lp-sizer" }, pageEl));
+  layoutSel = h("select", { class: "input select small", title: "Layouts of this workspace" });
+  layoutSel.addEventListener("change", () => activate(layoutSel.value));
   root.append(
     h("div", { class: "lp-bar" },
+      layoutSel,
+      b("New", "Add an empty layout", newLayout),
+      b("Rename…", "Rename this layout", renameLayout),
+      b("Duplicate", "Copy this layout", duplicateLayout),
+      b("Delete", "Delete this layout", deleteLayout),
+      h("span", { class: "lp-sep" }),
       b("Add current graph", "Add the graph window's plot (sample, population, axes)", () => addCurrent()),
       b("Add for every sample", "One panel per sample with the current axes and population", () => addEverySample()),
       b("Add histogram", "Histogram of the current X channel", () => addCurrent(true)),
@@ -63,19 +77,118 @@ export function initLayout(el: HTMLElement): void {
 }
 
 function onWorkspace(): void {
-  const name = state.ws?.name ?? "";
-  if (name !== wsName) {
-    const stored = loadLayout(name);
-    if (stored) layout = stored;
-    else if (wsName !== null && layout.panels.length) saveLayout(name, layout); // e.g. "Save as" renamed the workspace
-    else layout = emptyLayout();
-    wsName = name;
+  if (gen !== workspaceGeneration()) {
+    gen = workspaceGeneration();
+    loadFromWorkspace();
     selected = null;
+    data.clear();
+    updateSelector();
     if (visible()) build();
+  }
+  // Once the workspace has a file, the layouts live there: drop the browser draft.
+  if (state.ws?.path && draftName !== null) {
+    removeDraft(draftName);
+    draftName = null;
   }
   clearPanelCache();
   if (visible()) scheduleRefresh();
 }
+
+/**
+ * Take the layouts of a newly loaded workspace. A workspace without layouts
+ * imports (once) the layout an earlier version kept in the browser store, or,
+ * if it has never been saved, the browser draft.
+ */
+function loadFromWorkspace(): void {
+  const ws = state.ws;
+  const name = ws?.name ?? "";
+  let list = fromStored(ws?.layouts);
+  let push = false;
+  draftName = null;
+  if (!list.length && ws?.samples.length) {
+    const legacy = takeLegacyLayout(name);
+    if (legacy) {
+      list = [{ id: newLayoutId(), name: "Layout 1", data: legacy }];
+      push = true;
+      status.info("Moved the layout kept in the browser into the workspace");
+    } else if (!ws.path) {
+      list = loadDraft(name);
+      push = list.length > 0;
+    }
+  }
+  if (!list.length) list = [{ id: newLayoutId(), name: "Layout 1", data: emptyLayout() }];
+  layouts = list;
+  const want = uiState().activeLayout;
+  activeId = typeof want === "string" && list.some((l) => l.id === want) ? want : list[0].id;
+  layout = active().data;
+  if (push) persist();
+}
+
+const active = (): NamedLayout => layouts.find((l) => l.id === activeId) ?? layouts[0];
+
+/** Save the layouts into the workspace (debounced) and, while it has no file, into the browser draft. */
+function persist(): void {
+  persistLater("layouts", async () => {
+    const v = await api.layoutsSet(toStored(layouts));
+    if (state.ws) state.ws.layouts = v.layouts;
+  });
+  const ws = state.ws;
+  if (ws && !ws.path) {
+    draftName = ws.name;
+    saveDraft(ws.name, layouts);
+  }
+}
+
+function updateSelector(): void {
+  if (!layoutSel) return;
+  clear(layoutSel);
+  for (const l of layouts) layoutSel.append(h("option", { value: l.id, text: l.name }));
+  layoutSel.value = activeId;
+}
+
+function activate(id: string): void {
+  if (!layouts.some((l) => l.id === id)) return;
+  activeId = id;
+  layout = active().data;
+  selected = null;
+  data.clear();
+  setUiState({ activeLayout: id });
+  updateSelector();
+  refreshLayout();
+}
+
+function addLayout(l: NamedLayout): void {
+  layouts.push(l);
+  persist();
+  activate(l.id);
+}
+
+const newLayout = () => addLayout({ id: newLayoutId(), name: nextLayoutName(layouts), data: emptyLayout() });
+
+const duplicateLayout = () => {
+  const src = active();
+  const copy = JSON.parse(JSON.stringify(src.data)) as Layout;
+  copy.panels.forEach((p) => (p.id = newPanelId()));
+  addLayout({ id: newLayoutId(), name: nextLayoutName(layouts, `${src.name} copy`), data: copy });
+};
+
+const renameLayout = () => run(async () => {
+  const l = active();
+  const name = (await promptText("Rename layout", "Name", l.name))?.trim();
+  if (!name || name === l.name) return;
+  l.name = name;
+  persist();
+  updateSelector();
+});
+
+const deleteLayout = () => run(async () => {
+  const l = active();
+  if (l.data.panels.length && !(await confirmBox("Delete layout", `Delete the layout “${l.name}”?`, "Delete", true))) return;
+  layouts = layouts.filter((x) => x.id !== l.id);
+  if (!layouts.length) layouts.push({ id: newLayoutId(), name: "Layout 1", data: emptyLayout() });
+  persist();
+  activate(layouts[0].id);
+});
 
 function scheduleRefresh(): void {
   window.clearTimeout(refreshTimer);
@@ -83,8 +196,7 @@ function scheduleRefresh(): void {
 }
 
 function changed(rebuild = false): void {
-  window.clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(() => saveLayout(wsName ?? "", layout), 250);
+  persist();
   if (rebuild) build();
 }
 
@@ -324,3 +436,5 @@ const exportSvg = () => run(async () => {
 
 /** For tests / debugging: the current layout model. */
 export const currentLayout = (): Layout => layout;
+/** For tests / debugging: every layout of the workspace and the active one. */
+export const currentLayouts = (): { active: string; layouts: NamedLayout[] } => ({ active: activeId, layouts });

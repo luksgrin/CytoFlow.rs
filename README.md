@@ -76,8 +76,8 @@ fixtures (exact per-event agreement), against a FlowJo-exported biexponential
 lookup table, and against population counts stored in FlowJo workspaces (exact
 for rectangle, quadrant and biex/linear-axis gates; within 0.1 % for polygons
 on logicle axes; the ellipse-on-logicle convention is still 2–3 % off, see the
-test comments). Known gaps: the app bundle is unsigned, and layouts are kept in
-the browser store rather than in the workspace file. See
+test comments). Known gaps: the app bundle is unsigned. Named layouts, overlay
+selections and the last axes per sample are saved in the workspace file. See
 `docs/ipc.md` for the command surface, and open an issue for missing features.
 
 ## License

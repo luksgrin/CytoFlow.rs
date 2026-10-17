@@ -3,7 +3,7 @@
 // including groups (template trees) and per-sample gate trees / transforms.
 import type {
   ChannelStats, CompMatrix, CompSource, GateDim, GateNode, GateScope, GateShape, Group, HistResult,
-  PopulationStats, SampleGateNode, SampleInfo, Transform, TransformKind, WorkspaceView,
+  PopulationStats, SampleGateNode, SampleInfo, StoredLayout, Transform, TransformKind, WorkspaceView,
 } from "./types";
 import {
   CHANNELS, D0, D1, defaultTransform, demoSpill, fwd, generateSample, hash, initialTransform,
@@ -21,8 +21,7 @@ const EVENTS = 20000;
 const basename = (p: string) => p.split(/[\\/]/).pop() ?? p;
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
-function makeSample(path: string): MockSample {
-  const id = `s${idCounter++}`;
+function makeSample(path: string, id = `s${idCounter++}`): MockSample {
   const spill = demoSpill();
   const data = generateSample(hash(path), EVENTS, spill);
   const name = basename(path);
@@ -59,8 +58,49 @@ function emptyWorkspace(): WorkspaceView {
     version: 2, name: "Untitled", samples: [], channel_settings, sample_channel_settings: {},
     compensation: { source: "fcs" },
     groups: [{ id: "all", name: "All Samples", sample_ids: [], gates: [] }],
-    sample_gates: {}, gates: [], loaded: [], path: null,
+    sample_gates: {}, gates: [], layouts: [], ui_state: null, loaded: [], path: null,
   };
+}
+
+// "Files" written by workspace_save live in localStorage, so a mock workspace
+// can be saved, the page reloaded and the workspace reopened (sample data is
+// regenerated deterministically from the file path).
+const FILE_KEY = (path: string) => `cytoflow.mock.file:${path}`;
+
+function saveFile(path: string): void {
+  const doc = clone({ ...ws, gates: undefined, loaded: undefined, path: undefined });
+  try {
+    localStorage.setItem(FILE_KEY(path), JSON.stringify(doc));
+  } catch {
+    /* storage unavailable: the save only updates the path */
+  }
+}
+
+function openFile(path: string): boolean {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(FILE_KEY(path));
+  } catch {
+    raw = null;
+  }
+  if (!raw) return false;
+  const doc = JSON.parse(raw) as WorkspaceView;
+  samples.clear();
+  ws = { ...emptyWorkspace(), ...doc, gates: [], loaded: [], path };
+  ws.layouts ??= [];
+  ws.ui_state ??= null;
+  for (const info of ws.samples) {
+    const s = makeSample(info.path, info.id);
+    samples.set(info.id, s);
+    ws.loaded.push(info.id);
+    const n = Number(info.id.replace(/\D+/g, ""));
+    if (Number.isFinite(n) && n >= idCounter) idCounter = n + 1;
+  }
+  for (const g of [...ws.groups, ...Object.values(ws.sample_gates)].flatMap((x) => ("gates" in x ? x.gates : x))) {
+    const n = Number(g.id.replace(/\D+/g, ""));
+    if (Number.isFinite(n) && n >= idCounter) idCounter = n + 1;
+  }
+  return true;
 }
 
 function addSamples(paths: string[]): string[] {
@@ -521,8 +561,27 @@ function dispatch(cmd: string, a: Args): unknown {
   switch (cmd) {
     case "workspace_new": samples.clear(); ws = emptyWorkspace(); return view();
     case "workspace_get": return view();
-    case "workspace_open": demoWorkspace(); ws.path = str("path"); ws.name = basename(str("path")); return { workspace: view(), errors: [] };
-    case "workspace_save": ws.path = str("path"); ws.name = basename(str("path")).replace(/\.cfw\.json$/, ""); return view();
+    case "workspace_open":
+      if (!openFile(str("path"))) {
+        demoWorkspace();
+        ws.path = str("path");
+        ws.name = basename(str("path"));
+      }
+      return { workspace: view(), errors: [] };
+    case "workspace_save":
+      ws.path = str("path");
+      ws.name = basename(str("path")).replace(/\.cfw\.json$/, "");
+      saveFile(str("path"));
+      return view();
+    case "layouts_get": return clone(ws.layouts);
+    case "layouts_set": {
+      const ls = a.layouts as StoredLayout[];
+      if (!Array.isArray(ls) || ls.some((l) => typeof l?.id !== "string" || typeof l?.name !== "string")) throw "invalid layouts";
+      ws.layouts = clone(ls).map((l) => ({ id: l.id, name: l.name, data: l.data ?? null }));
+      return view();
+    }
+    case "ui_state_get": return clone(ws.ui_state ?? null);
+    case "ui_state_set": ws.ui_state = clone(a.uiState ?? null); return view();
     case "workspace_import_wsp": {
       demoWorkspace();
       const dirs = a.searchDirs as string[];

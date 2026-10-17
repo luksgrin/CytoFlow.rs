@@ -128,6 +128,92 @@ export function gatePath(id: string | null): string {
   return parts.length ? parts.join(" / ") : "All events";
 }
 
+// ---------------------------------------------------------------- persisted UI state
+//
+// Layouts and UI preferences live in the workspace file (`layouts_set`,
+// `ui_state_set`). Writes are debounced; `flushPersistence()` sends the
+// pending ones right away (before saving or replacing the workspace).
+
+/** Last axes / population shown for a sample. */
+export interface SampleView { x: GateDim | null; y: GateDim | null; hist: boolean; gateId: string | null }
+
+/** Shape of `WorkspaceView.ui_state` (owned by the frontend; unknown keys are kept). */
+export interface UiState {
+  sampleViews?: Record<string, SampleView>;
+  selection?: { sampleId: string | null; groupId: string | null };
+  [key: string]: unknown;
+}
+
+let ui: UiState = {};
+let generation = 0;
+const pendingWrites = new Map<string, { timer: number; fn: () => Promise<unknown> }>();
+const inflight = new Set<Promise<unknown>>();
+
+/** Incremented whenever a different workspace is loaded (open / new / import / boot). */
+export const workspaceGeneration = () => generation;
+export const uiState = (): UiState => ui;
+
+function track(p: Promise<unknown>): Promise<unknown> {
+  const q = p.catch((e) => console.error("persist:", e)).finally(() => inflight.delete(q));
+  inflight.add(q);
+  return q;
+}
+
+/** Run `fn` (a backend write) `ms` after the last call with the same key. */
+export function persistLater(key: string, fn: () => Promise<unknown>, ms = 500): void {
+  const prev = pendingWrites.get(key);
+  if (prev) window.clearTimeout(prev.timer);
+  const timer = window.setTimeout(() => {
+    pendingWrites.delete(key);
+    void track(fn());
+  }, ms);
+  pendingWrites.set(key, { timer, fn });
+}
+
+/** Send every pending debounced write now and wait for all writes in flight. */
+export async function flushPersistence(): Promise<void> {
+  const fns = [...pendingWrites.values()];
+  pendingWrites.clear();
+  for (const p of fns) {
+    window.clearTimeout(p.timer);
+    void track(p.fn());
+  }
+  while (inflight.size) await Promise.all([...inflight]);
+}
+
+/** Merge `patch` into the UI state and save it to the workspace (debounced). */
+export function setUiState(patch: Partial<UiState>): void {
+  ui = { ...ui, ...patch };
+  persistLater("ui_state", async () => {
+    const v = await api.uiStateSet(ui);
+    if (state.ws) state.ws.ui_state = v.ui_state;
+  });
+}
+
+const dimOk = (d: GateDim | null | undefined, s: SampleInfo): d is GateDim =>
+  !!d && typeof d.channel === "string" && s.channels.some((c) => c.name === d.channel);
+
+/** Remember the current axes / population of the plotted sample and the selection. */
+function rememberView(): void {
+  const sid = state.sampleId;
+  if (!state.ws || !sid) return;
+  const views = { ...(ui.sampleViews ?? {}) };
+  views[sid] = { x: state.x, y: state.y, hist: state.hist, gateId: state.gateId };
+  setUiState({ sampleViews: views, selection: { sampleId: sid, groupId: state.groupId } });
+}
+
+/** Restore the remembered axes / population of a sample (if any are still valid). */
+function restoreView(sid: string | null): void {
+  const s = state.ws?.samples.find((x) => x.id === sid);
+  const v = sid ? ui.sampleViews?.[sid] : undefined;
+  if (!s || !v) return;
+  if (dimOk(v.x, s)) state.x = v.x;
+  if (dimOk(v.y, s)) state.y = v.y;
+  state.hist = !!v.hist;
+  const tree = state.groupId ? groupById(state.groupId)?.gates ?? [] : sampleGates(sid);
+  state.gateId = v.gateId && tree.some((g) => g.id === v.gateId) ? v.gateId : null;
+}
+
 // ---------------------------------------------------------------- mutations
 
 let statsSeq = 0;
@@ -173,19 +259,37 @@ function fixAxes(): boolean {
   return changed;
 }
 
-export async function applyWorkspace(ws: WorkspaceView): Promise<void> {
-  // Tolerate an older backend / mock view without the group fields.
+/**
+ * Install a workspace view from the backend. `fresh` marks a different
+ * workspace (open / new / import; the first view at boot is always fresh):
+ * pending writes are dropped and the saved selection / axes are restored.
+ */
+export async function applyWorkspace(ws: WorkspaceView, opts: { fresh?: boolean } = {}): Promise<void> {
+  const fresh = !!opts.fresh || state.ws === null;
+  // Tolerate an older backend / mock view without the group / layout fields.
+  ws.layouts ??= [];
+  ws.ui_state ??= null;
   ws.groups ??= [{ id: ALL_SAMPLES, name: "All Samples", sample_ids: ws.samples.map((s) => s.id), gates: ws.gates ?? [] }];
   ws.sample_gates ??= Object.fromEntries(ws.samples.map((s) => [s.id, (ws.gates ?? []).map((g) => ({ ...g, tailored: false }))]));
   ws.sample_channel_settings ??= {};
   state.ws = ws;
+  if (fresh) {
+    for (const p of pendingWrites.values()) window.clearTimeout(p.timer);
+    pendingWrites.clear();
+    generation++;
+    ui = ws.ui_state && typeof ws.ui_state === "object" && !Array.isArray(ws.ui_state) ? { ...(ws.ui_state as UiState) } : {};
+    const sel = ui.selection;
+    if (sel && ws.samples.some((s) => s.id === sel.sampleId)) state.sampleId = sel.sampleId;
+    if (sel && (sel.groupId === null || ws.groups.some((g) => g.id === sel.groupId))) state.groupId = sel.groupId;
+  }
   if (!ws.samples.some((s) => s.id === state.sampleId)) state.sampleId = ws.samples[0]?.id ?? null;
   if (state.groupId && !ws.groups.some((g) => g.id === state.groupId)) state.groupId = ALL_SAMPLES;
   if (!state.groupId && !state.sampleId) state.groupId = ALL_SAMPLES;
   const ids = new Set(currentGates().map((g) => g.id));
   if (state.gateId && !ids.has(state.gateId)) state.gateId = null;
   if (state.plotGate && !ids.has(state.plotGate)) state.plotGate = null;
-  const axesChanged = fixAxes();
+  if (fresh) restoreView(state.sampleId);
+  const axesChanged = fixAxes() || fresh;
   emit("workspace");
   if (axesChanged) emit("axes");
   await refreshStats();
@@ -199,7 +303,9 @@ export async function selectSample(id: string): Promise<void> {
   state.groupId = null;
   state.plotGate = null;
   if (state.gateId && !sampleGate(state.gateId, id)) state.gateId = null;
-  const axesChanged = fixAxes();
+  if (sampleChanged) restoreView(id);
+  const axesChanged = fixAxes() || sampleChanged;
+  rememberView();
   emit("selection");
   if (axesChanged) emit("axes");
   if (sampleChanged) await refreshStats();
@@ -218,6 +324,7 @@ export async function selectGroup(id: string): Promise<void> {
   if (g.sample_ids.length && !g.sample_ids.includes(state.sampleId ?? "")) state.sampleId = g.sample_ids[0];
   if (state.gateId && !g.gates.some((x) => x.id === state.gateId)) state.gateId = null;
   const axesChanged = fixAxes();
+  rememberView();
   emit("selection");
   if (axesChanged) emit("axes");
   if (prev !== state.sampleId) await refreshStats();
@@ -226,6 +333,7 @@ export async function selectGroup(id: string): Promise<void> {
 export function selectPopulation(id: string | null): void {
   state.gateId = id;
   state.plotGate = null;
+  rememberView();
   emit("selection");
 }
 
@@ -234,6 +342,7 @@ export function setAxes(x: GateDim | null, y: GateDim | null, hist = state.hist)
   if (y) state.y = y;
   state.hist = hist;
   state.plotGate = null;
+  rememberView();
   emit("axes");
 }
 
