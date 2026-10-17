@@ -1,12 +1,14 @@
 // TypeScript mirror of the shared JSON types in docs/ipc.md.
 
-export type TransformKind = "linear" | "log" | "asinh" | "logicle";
+export type TransformKind = "linear" | "log" | "asinh" | "logicle" | "biex";
 
 export type Transform =
   | { kind: "linear"; t: number; a: number }
   | { kind: "log"; t: number; m: number }
   | { kind: "asinh"; t: number; m: number; a: number }
-  | { kind: "logicle"; t: number; w: number; m: number; a: number };
+  | { kind: "logicle"; t: number; w: number; m: number; a: number }
+  // FlowJo biexponential: w = width basis (<= 0, e.g. -10, -100), pos / neg decades.
+  | { kind: "biex"; t: number; w: number; pos: number; neg: number };
 
 export interface GateDim {
   channel: string;

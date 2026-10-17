@@ -43,6 +43,7 @@ export function defaultTransform(kind: TransformKind, range: number): Transform 
     case "log": return { kind, t: range, m: 4.5 };
     case "asinh": return { kind, t: range, m: 4.5, a: 0.3 };
     case "logicle": return { kind, t: range, w: 0.5, m: 4.5, a: 0 };
+    case "biex": return { kind, t: range, w: -100, pos: 4.5, neg: 0 };
   }
 }
 
@@ -55,6 +56,8 @@ export function initialTransform(ch: string): Transform {
 function asinhParams(t: Transform): [number, number, number] {
   if (t.kind === "asinh") return [t.t, t.m, t.a];
   if (t.kind === "logicle") return [t.t, t.m, 2 * t.w + t.a];
+  // biex ≈ logicle with M = pos, W = log10|width| / 2, A = neg.
+  if (t.kind === "biex") return [t.t, t.pos, Math.log10(Math.max(1, Math.abs(t.w))) + t.neg];
   return [1, 1, 0];
 }
 

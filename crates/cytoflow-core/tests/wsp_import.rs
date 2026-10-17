@@ -33,9 +33,11 @@ const PARENT_TOL: f64 = 0.001;
 /// contain rectangles/quadrants, whose membership does not depend on any
 /// monotonic axis transform, so they are in fact exact.)
 const BIEX_TOL: f64 = 0.05;
-/// The FlowJo ellipse is tracked with a loose bound on its own count; see
-/// `ics_with_ellipse`.
-const ELLIPSE_TOL: f64 = 0.05;
+/// The FlowJo ellipse on logicle axes: its geometry is exact on linear axes
+/// (tests/wsp_ellipse.rs), but on these logicle axes it undercounts FlowJo
+/// by 2.0 / 2.1 / 3.1 % (E03 / E05 / E01; 5875 vs 6002, 6010 vs 6133,
+/// 7032 vs 7256); see `ics_with_ellipse`.
+const ELLIPSE_TOL: f64 = 0.035;
 
 struct Row {
     sample: String,

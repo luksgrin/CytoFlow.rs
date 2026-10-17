@@ -45,13 +45,17 @@ struct WspSample {
     counts: Vec<(String, usize)>,
 }
 
-/// FlowJo's biexponential (`width` basis, `pos` decades, `neg` decades) mapped
-/// onto a logicle scale using the Parks et al. relation
-/// `W = (M − log10(T / |width|)) / 2`.
+/// Logicle approximation of a FlowJo biexponential (`width` basis, `pos`
+/// decades, `neg` decades), kept as a fallback helper: the import itself
+/// uses the exact [`Transform::Biex`]. The biex scale is the logicle family
+/// with `M = pos`, `A = neg` and `W = log10(|width|) / 2` (the
+/// correspondence CytoML uses to map FlowJo logicle onto its biex,
+/// `widthBasis = −10^{2W}`); the two differ only by FlowJo's table
+/// quantisation and normalisation (≤ 10⁻³ of the display range).
 pub fn biex_to_logicle(max_range: f64, width: f64, pos: f64, neg: f64) -> Transform {
     let t = if max_range > 0.0 { max_range } else { 262144.0 };
     let m = if pos > 0.0 { pos } else { 4.5 };
-    let w = if width.abs() > 0.0 { ((m - (t / width.abs()).log10()) / 2.0).clamp(0.0, m / 2.0) } else { 0.5 };
+    let w = (width.abs().max(1.0).log10() / 2.0).clamp(0.0, m / 2.0);
     Transform::Logicle { t, w, m, a: neg.max(0.0) }
 }
 
@@ -123,7 +127,8 @@ fn parse_transforms(container: &Element, comp_prefixes: &[String]) -> Transforms
             "log" => Transform::Log { t: 10f64.powf(t.attr_f64("offset").unwrap_or(0.0) + t.attr_f64("decades").unwrap_or(4.5)), m: t.attr_f64("decades").unwrap_or(4.5) },
             "logicle" => Transform::Logicle { t: t.attr_f64("T").unwrap_or(262144.0), w: t.attr_f64("W").unwrap_or(0.5), m: t.attr_f64("M").unwrap_or(4.5), a: t.attr_f64("A").unwrap_or(0.0) },
             "fasinh" => Transform::Asinh { t: t.attr_f64("T").unwrap_or(262144.0), m: t.attr_f64("M").unwrap_or(4.5), a: t.attr_f64("A").unwrap_or(0.0) },
-            "biex" => biex_to_logicle(t.attr_f64("maxRange").unwrap_or(262144.0), t.attr_f64("width").unwrap_or(-10.0), t.attr_f64("pos").unwrap_or(4.5), t.attr_f64("neg").unwrap_or(0.0)),
+            // FlowJo's own biexponential, with the file's parameters.
+            "biex" => Transform::Biex { t: t.attr_f64("maxRange").filter(|v| *v > 0.0).unwrap_or(262144.0), w: t.attr_f64("width").unwrap_or(-10.0), pos: t.attr_f64("pos").unwrap_or(4.5), neg: t.attr_f64("neg").unwrap_or(0.0) },
             "hyperlog" => Transform::Logicle { t: t.attr_f64("T").unwrap_or(262144.0), w: t.attr_f64("W").unwrap_or(0.5), m: t.attr_f64("M").unwrap_or(4.5), a: t.attr_f64("A").unwrap_or(0.0) },
             _ => continue,
         };
@@ -232,7 +237,28 @@ impl TreeCtx<'_> {
                 if dims.len() != 2 {
                     return None;
                 }
-                // FlowJo stores ellipsoid foci/edge vertices on its 0..256 display grid.
+                // FlowJo's ellipse, as observed in the public fixtures:
+                // * foci and edge vertices are in display space scaled to a
+                //   0..`gateResolution` (default 256) grid, i.e. `display·256`;
+                // * the four edge vertices are the ends of the major axis
+                //   (first two) and of the minor axis (last two); the foci are
+                //   derived from them (`c² = a² − b²` holds to rounding), so
+                //   the ellipse is: centre = midpoint of the foci, semi-major
+                //   axis `a` = half the summed focal distances of the first
+                //   edge vertex, `b = √(a² − c²)`;
+                // * `gating:distance` is *not* `2a` (on the 51-event FlowKit
+                //   fixture it would admit 66 events instead of FlowJo's 51; it
+                //   appears to be measured in screen pixels of the plot window);
+                // * membership is tested on the exact display values: on linear
+                //   axes this reproduces FlowJo exactly (tests/wsp_ellipse.rs),
+                //   whereas snapping events to the grid (as for polygons) or
+                //   flooring them to bins does not (flooring merges events 50
+                //   and 51 of that fixture).
+                // On logicle axes the same geometry undercounts FlowJo by 2-3 %
+                // (8_color_ICS_with_ellipse.wsp): consistent with FlowJo's
+                // logicle display grid being offset by about one grid unit
+                // from `256 · logicle(x)`, which no public description pins
+                // down; see tests/wsp_import.rs.
                 let res = shape_el.attr_f64("gateResolution").unwrap_or(256.0);
                 let pts = |name: &str| -> Vec<[f64; 2]> {
                     shape_el

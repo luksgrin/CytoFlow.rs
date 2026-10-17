@@ -11,4 +11,10 @@ for f in 8_color_data_set/fcs_files/101_DEN084Y5_15_E01_008_clean.fcs \
   name=$(basename "$f")
   [ -f "$name" ] || { echo "fetching $name"; curl -fsSL -o "$name" "$BASE/$f"; }
 done
+# FlowSOM example data (GPL >= 2): FlowJo workspace with polygons on biex axes.
+mkdir -p flowsom
+FLOWSOM="https://raw.githubusercontent.com/SofieVG/FlowSOM/master/inst/extdata"
+for name in gating.wsp 68983.fcs; do
+  [ -f "flowsom/$name" ] || { echo "fetching flowsom/$name"; curl -fsSL -o "flowsom/$name" "$FLOWSOM/$name"; }
+done
 echo done

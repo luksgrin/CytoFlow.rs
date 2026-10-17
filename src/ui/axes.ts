@@ -6,12 +6,13 @@ import { clear, h } from "./dom";
 import { popover } from "./modal";
 import { run, status } from "./status";
 
-const KINDS: TransformKind[] = ["linear", "log", "asinh", "logicle"];
+const KINDS: TransformKind[] = ["linear", "log", "asinh", "logicle", "biex"];
 const PARAMS: Record<TransformKind, [string, string][]> = {
   linear: [["t", "T — top of scale"], ["a", "A — offset below zero"]],
   log: [["t", "T — top of scale"], ["m", "M — decades"]],
   asinh: [["t", "T — top of scale"], ["m", "M — decades"], ["a", "A — extra negative decades"]],
   logicle: [["t", "T — top of scale"], ["w", "W — linear width (decades)"], ["m", "M — decades"], ["a", "A — extra negative decades"]],
+  biex: [["t", "T — top of scale"], ["w", "Width basis (≤ 0, e.g. −100)"], ["pos", "Pos — positive decades"], ["neg", "Neg — extra negative decades"]],
 };
 
 interface AxisCtl {
