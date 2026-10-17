@@ -6,67 +6,130 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
 jobs:
-  core:
-    name: Engine tests
+  frontend:
+    name: Frontend typecheck + build
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p cytoflow-core
-      - run: cargo clippy -p cytoflow-core -- -D warnings
 
-  app:
-    name: Build app (${{ matrix.os }})
-    needs: core
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v5
+      - name: Check versions agree
+        run: scripts/check-version.sh
+
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+  engine:
+    name: Engine tests + clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      # Needed by `clippy -p cytoflow` (the Tauri shell links against WebKitGTK).
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      # tauri::generate_context! requires the frontend dist directory to exist.
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: '. -> target'
-      - run: npm ci
-      - run: npm run typecheck --if-present
-      - run: npm run build
-      - run: cargo install tauri-cli --version "^2" --locked
-      - run: cargo tauri build --target ${{ matrix.target }} --bundles app,dmg
-      - uses: actions/upload-artifact@v4
-        with:
-          name: CytoFlow-${{ matrix.target }}
-          path: |
-            target/${{ matrix.target }}/release/bundle/dmg/*.dmg
-            target/${{ matrix.target }}/release/bundle/macos/*.app
-          if-no-files-found: warn
+          components: clippy
 
-  release:
-    name: Attach to release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: app
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache large test fixtures
+        uses: actions/cache@v4
+        with:
+          path: testdata/large
+          key: testdata-large-${{ hashFiles('scripts/fetch-testdata.sh') }}
+
+      - name: Fetch large test fixtures
+        run: scripts/fetch-testdata.sh
+
+      - name: Test engine
+        run: cargo test --locked -p cytoflow-core
+
+      - name: Clippy
+        run: cargo clippy --locked -p cytoflow-core -p cytoflow --all-targets -- -D warnings
+
+  build:
+    name: Compile app (${{ matrix.os }})
+    needs: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: actions/setup-node@v5
         with:
-          path: artifacts
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/**/*.dmg
+          node-version: '22'
+          cache: npm
+
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compile Tauri app (no bundles)
+        run: cargo build --locked -p cytoflow

@@ -1,0 +1,282 @@
+name: Release
+
+# Manually triggered only: Actions -> Release -> Run workflow (from main).
+# See RELEASING.md for the full procedure.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to create and release, e.g. v0.1.0 (must equal "v" + the version in Cargo.toml, package.json and tauri.conf.json)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark the GitHub release as a pre-release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Never run two releases at once (a second run for the same tag would race the
+# "tag must not exist" check).
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  validate:
+    name: Validate tag and versions
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Validate
+        id: check
+        env:
+          TAG: ${{ inputs.tag }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::Releases must be run from main (this run is on $REF). Re-run the workflow with 'Use workflow from: main'."
+            exit 1
+          fi
+
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::Tag '$TAG' is not of the form vMAJOR.MINOR.PATCH[-PRERELEASE] (e.g. v0.1.0 or v0.2.0-1)."
+            exit 1
+          fi
+          version="${TAG#v}"
+
+          # The Windows MSI (WiX) only accepts a numeric pre-release identifier <= 65535.
+          if [[ "$version" == *-* ]]; then
+            pre="${version#*-}"
+            if ! [[ "$pre" =~ ^[0-9]+$ ]] || [ "$pre" -gt 65535 ]; then
+              echo "::error::Pre-release identifier '$pre' is not supported by the Windows MSI bundler: it must be numeric and <= 65535 (use e.g. v0.2.0-1, not v0.2.0-rc.1)."
+              exit 1
+            fi
+          fi
+
+          echo "Checking versions against tag $TAG"
+          scripts/check-version.sh "$TAG"
+
+          if [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
+            echo "::error::Tag $TAG already exists on the remote. A tag can only be released once; bump the version instead."
+            exit 1
+          fi
+
+          if out="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" 2>&1)"; then
+            echo "::error::A GitHub release for $TAG already exists. A tag can only be released once; bump the version instead."
+            exit 1
+          elif ! grep -qi "not found" <<<"$out"; then
+            echo "::error::Could not check for an existing release: $out"
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "OK: releasing $TAG (version $version) from $SHA"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: validate
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            os: macos-15
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - name: macOS Intel
+            # Cross-compiled on an Apple Silicon runner (Intel macOS runners are being retired).
+            os: macos-15
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+          - name: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: msi,nsis
+          - name: Linux x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      # beforeBuildCommand (npm run build) builds the frontend.
+      - name: Build bundles
+        shell: bash
+        run: cargo tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      - name: Collect installers under release names
+        shell: bash
+        run: scripts/collect-bundles.sh "${{ matrix.target }}" "${{ needs.validate.outputs.version }}" release-files
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.target }}
+          path: release-files/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Tag and publish release
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag }}
+      VERSION: ${{ needs.validate.outputs.version }}
+      SHA: ${{ needs.validate.outputs.sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          path: release-files
+          merge-multiple: true
+
+      - name: Source archive
+        run: git archive --format=tar.gz --prefix="CytoFlow.rs-${VERSION}/" -o release-files/source.tar.gz "$SHA"
+
+      - name: Verify asset list
+        run: |
+          set -euo pipefail
+          expected="$(printf '%s\n' \
+            "CytoFlow_${VERSION}_aarch64.dmg" \
+            "CytoFlow_${VERSION}_x64.dmg" \
+            "CytoFlow_${VERSION}_x64_en-US.msi" \
+            "CytoFlow_${VERSION}_x64-setup.exe" \
+            "CytoFlow_${VERSION}_amd64.deb" \
+            "CytoFlow_${VERSION}_amd64.AppImage" \
+            "source.tar.gz" | sort)"
+          actual="$(ls -1 release-files | sort)"
+          ls -la release-files
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::Release assets differ from the expected list."
+            diff <(echo "$expected") <(echo "$actual") || true
+            exit 1
+          fi
+
+      - name: Re-check and create annotated tag
+        run: |
+          set -euo pipefail
+          if [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
+            echo "::error::Tag $TAG appeared on the remote while building; refusing to release twice."
+            exit 1
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::A release for $TAG appeared while building; refusing to release twice."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "CytoFlow $TAG" "$SHA"
+          git push origin "refs/tags/$TAG"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          target_commitish: ${{ needs.validate.outputs.sha }}
+          name: CytoFlow ${{ inputs.tag }}
+          prerelease: ${{ inputs.prerelease }}
+          make_latest: ${{ inputs.prerelease && 'false' || 'true' }}
+          draft: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release-files/*
+          body: |
+            ## CytoFlow ${{ inputs.tag }}
+
+            Documentation: https://luksgrin.xyz/CytoFlow.rs/
+
+            ### Downloads
+
+            | Platform | File |
+            | --- | --- |
+            | macOS, Apple Silicon (M1 and later) | `CytoFlow_${{ needs.validate.outputs.version }}_aarch64.dmg` |
+            | macOS, Intel | `CytoFlow_${{ needs.validate.outputs.version }}_x64.dmg` |
+            | Windows 10/11 x64, installer (per-user, no admin) | `CytoFlow_${{ needs.validate.outputs.version }}_x64-setup.exe` |
+            | Windows 10/11 x64, MSI | `CytoFlow_${{ needs.validate.outputs.version }}_x64_en-US.msi` |
+            | Linux x64, Debian/Ubuntu | `CytoFlow_${{ needs.validate.outputs.version }}_amd64.deb` |
+            | Linux x64, any distribution | `CytoFlow_${{ needs.validate.outputs.version }}_amd64.AppImage` |
+            | Source code | `source.tar.gz` |
+
+            ### Installation
+
+            The builds are not code-signed, so each operating system shows a warning the first time.
+
+            **macOS** (11 Big Sur or later)
+            1. Open the `.dmg` and drag **CytoFlow** into **Applications**.
+            2. If macOS says the app "is damaged" or "cannot be opened", run in Terminal:
+               `xattr -cr /Applications/CytoFlow.app`
+            3. Alternatively, right-click (Control-click) the app, choose **Open**, then **Open** again in the dialog,
+               or go to **System Settings → Privacy & Security** and click **Open Anyway**.
+
+            **Windows**
+            - Run `CytoFlow_${{ needs.validate.outputs.version }}_x64-setup.exe` (installs for the current user) or the `.msi`.
+            - If SmartScreen shows "Windows protected your PC", click **More info → Run anyway**.
+
+            **Linux**
+            - Debian/Ubuntu: `sudo dpkg -i CytoFlow_${{ needs.validate.outputs.version }}_amd64.deb` (then `sudo apt-get -f install` if dependencies are missing).
+            - AppImage: `chmod +x CytoFlow_${{ needs.validate.outputs.version }}_amd64.AppImage && ./CytoFlow_${{ needs.validate.outputs.version }}_amd64.AppImage`
+
+            ### Changes

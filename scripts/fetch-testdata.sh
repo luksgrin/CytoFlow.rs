@@ -2,6 +2,7 @@
 # Downloads the large public FCS fixtures (FlowKit, BSD-3) used by the
 # workspace-import integration tests. Safe to re-run.
 set -euo pipefail
+mkdir -p "$(dirname "$0")/../testdata/large"
 cd "$(dirname "$0")/../testdata/large"
 BASE="https://raw.githubusercontent.com/whitews/FlowKit/master/data"
 for f in 8_color_data_set/fcs_files/101_DEN084Y5_15_E01_008_clean.fcs \

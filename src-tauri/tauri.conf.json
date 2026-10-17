@@ -27,7 +27,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": "all",
     "category": "public.app-category.medical",
     "shortDescription": "Flow cytometry analysis",
     "longDescription": "CytoFlow.rs is an open-source flow cytometry analysis application.",
@@ -40,6 +40,34 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
+    },
+    "publisher": "Lucas Goiriz",
+    "copyright": "Copyright (c) Lucas Goiriz. MIT License.",
+    "license": "MIT",
+    "homepage": "https://luksgrin.xyz/CytoFlow.rs/",
+    "windows": {
+      "wix": {
+        "language": "en-US"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "English"
+        ],
+        "displayLanguageSelector": false
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0"
+        ],
+        "section": "science"
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
     }
   }
 }
