@@ -184,6 +184,48 @@ impl Transform {
     }
 }
 
+impl Transform {
+    /// Ticks for a (possibly zoomed) display window `[lo, hi]`: the regular
+    /// ticks inside the window, or — when fewer than two labelled ticks would
+    /// be visible — "nice" round values in data space so a zoomed axis stays readable.
+    pub fn ticks_in(&self, lo: f64, hi: f64) -> Vec<(f64, String, bool)> {
+        let base: Vec<_> = self.ticks().into_iter().filter(|t| t.0 >= lo - 1e-9 && t.0 <= hi + 1e-9).collect();
+        if base.iter().filter(|t| t.2 && !t.1.is_empty()).count() >= 2 {
+            return base;
+        }
+        let (v0, v1) = (self.invert(lo), self.invert(hi));
+        if !v0.is_finite() || !v1.is_finite() || v1 <= v0 {
+            return base;
+        }
+        let step = nice_step((v1 - v0) / 5.0);
+        let mut out = Vec::new();
+        let mut k = (v0 / step).ceil();
+        while k * step <= v1 + step * 1e-9 && out.len() < 50 {
+            let v = if (k * step).abs() < step * 1e-9 { 0.0 } else { k * step };
+            let y = self.apply(v);
+            if y.is_finite() && y >= lo - 1e-9 && y <= hi + 1e-9 {
+                out.push((y, format_value(v, step), true));
+            }
+            k += 1.0;
+        }
+        if out.len() < 2 {
+            return base;
+        }
+        out
+    }
+}
+
+/// Round value label for a tick spacing `step` (`25K`, `1.5K`, `250`, `0.05`).
+fn format_value(v: f64, step: f64) -> String {
+    let dec = |s: f64| if s >= 1.0 { 0 } else { (-s.log10()).ceil() as usize };
+    let s = if step >= 1000.0 || v.abs() >= 10_000.0 {
+        format!("{:.*}K", dec(step / 1000.0), v / 1000.0)
+    } else {
+        format!("{:.*}", dec(step), v)
+    };
+    if s.starts_with("-0") && s.trim_start_matches(['-', '0', '.', 'K']).is_empty() { s[1..].to_string() } else { s }
+}
+
 fn nice_step(raw: f64) -> f64 {
     if raw <= 0.0 {
         return 1.0;
@@ -504,6 +546,26 @@ fn solve_d(b: f64, w: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoomed_ticks_stay_readable() {
+        let lin = Transform::Linear { t: 262144.0, a: 0.0 };
+        let tk = lin.ticks_in(0.30, 0.35);
+        assert!(tk.len() >= 2, "{tk:?}");
+        assert!(tk.iter().all(|t| t.2 && (0.30..=0.35).contains(&t.0) && t.1.ends_with('K')), "{tk:?}");
+        let log = Transform::Log { t: 262144.0, m: 4.5 };
+        // Full window: the regular decade ticks.
+        assert_eq!(log.ticks_in(-0.02, 1.02), log.ticks());
+        // Inside one decade: round values (e.g. 2K, 4K, ...) instead of a lone label.
+        let (lo, hi) = (log.apply(1500.0), log.apply(9000.0));
+        let tk = log.ticks_in(lo, hi);
+        assert!(tk.iter().filter(|t| !t.1.is_empty()).count() >= 2, "{tk:?}");
+        assert_eq!(format_value(2500.0, 500.0), "2500");
+        assert_eq!(format_value(12500.0, 500.0), "12.5K");
+        assert_eq!(format_value(250.0, 50.0), "250");
+        assert_eq!(format_value(0.05, 0.01), "0.05");
+        assert_eq!(format_value(-0.0, 1.0), "0");
+    }
 
     #[test]
     fn linear_roundtrip() {

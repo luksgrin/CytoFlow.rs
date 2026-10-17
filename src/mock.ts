@@ -322,40 +322,65 @@ function label(d: GateDim): string {
   return `${d.compensated ? "Comp-" : ""}${d.channel}${p?.[1] ? ` :: ${p[1]}` : ""}`;
 }
 
-function plotHist(sid: string, gid: string | null, x: GateDim, bins: number): HistResult {
+type Win = [number, number];
+/** Same rule as the backend's `plot::view_range`. */
+const viewRange = (r: unknown): Win =>
+  Array.isArray(r) && r.length === 2 && Number.isFinite(r[0]) && Number.isFinite(r[1]) && r[1] - r[0] > 1e-6 ? [r[0], r[1]] : [D0, D1];
+
+/** Bin index of `v` in window `r` (null = outside; events beyond an outer edge pile into the edge cell). */
+function binner(r: Win, bins: number): (v: number) => number | null {
+  const pileLo = r[0] <= D0 + 1e-6, pileHi = r[1] >= D1 - 1e-6;
+  const scale = bins / (r[1] - r[0]);
+  return (v) => {
+    if (!Number.isFinite(v) || (v < r[0] && !pileLo) || (v > r[1] && !pileHi)) return null;
+    return Math.min(bins - 1, Math.max(0, Math.floor((v - r[0]) * scale)));
+  };
+}
+
+function plotHist(sid: string, gid: string | null, x: GateDim, bins: number, range: unknown): HistResult {
   const s = getSample(sid);
   const v = display(s, x);
   const m = gateMask(s, gid);
+  const r = viewRange(range);
+  const bin = binner(r, bins);
   const counts = new Array<number>(bins).fill(0);
   let total = 0;
   for (let i = 0; i < v.length; i++) {
     if (!m[i]) continue;
+    const b = bin(v[i]);
+    if (b === null) continue;
     total++;
-    counts[Math.min(bins - 1, Math.floor(((v[i] - D0) / (D1 - D0)) * bins))]++;
+    counts[b]++;
   }
-  return { bins, counts, max_count: Math.max(0, ...counts), total, range: [D0, D1], ticks: ticksFor(tf(x.channel, sid)), label: label(x) };
+  return { bins, counts, max_count: Math.max(0, ...counts), total, range: r, ticks: ticksFor(tf(x.channel, sid)), label: label(x) };
 }
 
-function plot2d(sid: string, gid: string | null, x: GateDim, y: GateDim, bins: number, maxPoints: number): ArrayBuffer {
+function plot2d(sid: string, gid: string | null, x: GateDim, y: GateDim, bins: number, maxPoints: number, xRange: unknown, yRange: unknown): ArrayBuffer {
   const s = getSample(sid);
   const vx = display(s, x);
   const vy = display(s, y);
   const m = gateMask(s, gid);
+  const xr = viewRange(xRange), yr = viewRange(yRange);
+  const bx = binner(xr, bins), by = binner(yr, bins);
   const counts = new Uint32Array(bins * bins);
   const idx: number[] = [];
-  const binOf = (i: number) => {
-    const bx = Math.min(bins - 1, Math.floor(((vx[i] - D0) / (D1 - D0)) * bins));
-    const by = Math.min(bins - 1, Math.floor(((vy[i] - D0) / (D1 - D0)) * bins));
-    return by * bins + bx;
-  };
-  for (let i = 0; i < vx.length; i++) if (m[i]) (idx.push(i), counts[binOf(i)]++);
+  const cell = new Int32Array(vx.length);
+  const binOf = (i: number) => cell[i];
+  for (let i = 0; i < vx.length; i++) {
+    if (!m[i]) continue;
+    const a = bx(vx[i]), b = by(vy[i]);
+    if (a === null || b === null) continue;
+    idx.push(i);
+    cell[i] = b * bins + a;
+    counts[b * bins + a]++;
+  }
   const maxCount = counts.reduce((a, b) => Math.max(a, b), 0);
   const stride = Math.max(1, idx.length / Math.max(1, maxPoints));
   const pick: number[] = [];
   for (let k = 0; k < idx.length && pick.length < maxPoints; k += stride) pick.push(idx[Math.floor(k)]);
   const header = new TextEncoder().encode(JSON.stringify({
     x_label: label(x), y_label: label(y), x_ticks: ticksFor(tf(x.channel, sid)), y_ticks: ticksFor(tf(y.channel, sid)),
-    total: idx.length, max_count: maxCount, bins,
+    total: idx.length, max_count: maxCount, bins, x_range: xr, y_range: yr,
   }));
   const n = pick.length;
   const size = 8 + header.length + 4 + bins * bins * 4 + 4 + n * 9;
@@ -370,8 +395,9 @@ function plot2d(sid: string, gid: string | null, x: GateDim, y: GateDim, bins: n
   u32(bins);
   counts.forEach((c) => u32(c));
   u32(n);
-  pick.forEach((i) => (dv.setFloat32(o, vx[i], true), (o += 4)));
-  pick.forEach((i) => (dv.setFloat32(o, vy[i], true), (o += 4)));
+  const cl = (v: number, r: Win) => Math.min(r[1], Math.max(r[0], v));
+  pick.forEach((i) => (dv.setFloat32(o, cl(vx[i], xr), true), (o += 4)));
+  pick.forEach((i) => (dv.setFloat32(o, cl(vy[i], yr), true), (o += 4)));
   const lmax = Math.log1p(maxCount) || 1;
   pick.forEach((i) => dv.setUint8(o++, Math.round((255 * Math.log1p(counts[binOf(i)])) / lmax)));
   return buf;
@@ -635,9 +661,18 @@ function dispatch(cmd: string, a: Args): unknown {
     case "population_stats": return populationStats(str("sampleId"));
     case "channel_stats": return channelStats(str("sampleId"), a.gateId as string | null, str("channel"), Boolean(a.compensated));
     case "axis_ticks": return ticksFor(tf(str("channel"), (a.sampleId as string | undefined) ?? null));
-    case "plot_hist": return plotHist(str("sampleId"), a.gateId as string | null, a.x as GateDim, a.bins as number);
-    case "plot_2d": return plot2d(str("sampleId"), a.gateId as string | null, a.x as GateDim, a.y as GateDim, a.bins as number, a.maxPoints as number);
-    case "export_population_csv": return countMask(gateMask(getSample(str("sampleId")), a.gateId as string | null));
+    case "plot_hist": return plotHist(str("sampleId"), a.gateId as string | null, a.x as GateDim, a.bins as number, a.range);
+    case "plot_2d": return plot2d(str("sampleId"), a.gateId as string | null, a.x as GateDim, a.y as GateDim, a.bins as number, a.maxPoints as number, a.xRange, a.yRange);
+    case "export_population_csv":
+    case "export_population": {
+      const fmt = (a.format as string | undefined) ?? "csv";
+      if (!["csv", "xlsx", "parquet"].includes(fmt)) throw new Error(`unknown format ${fmt}`);
+      const n = countMask(gateMask(getSample(str("sampleId")), a.gateId as string | null));
+      // Recorded so headless tests can check what the dialog sent.
+      (window as unknown as { __mockExports?: unknown[] }).__mockExports ??= [];
+      (window as unknown as { __mockExports: unknown[] }).__mockExports.push({ cmd, ...clone(a), format: fmt, rows: n });
+      return n;
+    }
     case "export_stats_csv": return ws.samples.reduce((n, s) => n + (ws.sample_gates[s.id]?.length ?? 0) + 1, 0);
     default: throw `unknown command ${cmd}`;
   }

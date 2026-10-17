@@ -2,8 +2,8 @@
 // 1-D: outlined histograms (optionally normalised); 2-D: contour outlines or dot clouds.
 import type { HistResult, Plot2D } from "../types";
 import { marchingSquares, probabilityLevels, smooth } from "./contour";
-import { drawAxes, niceCountTicks, type PlotData, type Theme } from "./render";
-import { D0, DSPAN, type Frame, toPx, toPy } from "./scale";
+import { countTicks, drawAxes, plotRanges, type PlotData, type Theme } from "./render";
+import { type Frame, toPx, toPy } from "./scale";
 
 export type HistNorm = "mode" | "total" | "count";
 export type OverlayStyle = "contour" | "dots";
@@ -61,7 +61,7 @@ function drawHistSeries(ctx: CanvasRenderingContext2D, f: Frame, series: Series[
     ctx.stroke();
   });
   ctx.restore();
-  const yt = niceCountTicks(ymax).map((t) => ({ ...t, pos: D0 + (t.pos / ymax) * DSPAN }));
+  const yt = countTicks(f, ymax);
   const first = hs[0]?.data.hist;
   drawAxes(ctx, f, th, first?.ticks ?? [], yt, first?.label ?? "", NORM_LABEL[norm]);
 }
@@ -81,9 +81,10 @@ function draw2DSeries(ctx: CanvasRenderingContext2D, f: Frame, series: Series[],
       ctx.globalAlpha = 1;
       continue;
     }
-    const cell = DSPAN / p.bins;
-    const gx = (i: number) => toPx(f, D0 + (i + 0.5) * cell);
-    const gy = (j: number) => toPy(f, D0 + (j + 0.5) * cell);
+    const [xr, yr] = plotRanges(p);
+    const cx = (xr[1] - xr[0]) / p.bins, cy = (yr[1] - yr[0]) / p.bins;
+    const gx = (i: number) => toPx(f, xr[0] + (i + 0.5) * cx);
+    const gy = (j: number) => toPy(f, yr[0] + (j + 0.5) * cy);
     ctx.strokeStyle = s.color;
     contourSegments(p).forEach((seg, k, all) => {
       ctx.lineWidth = (f.compact ? 0.8 : 1.1) + (k === all.length - 1 ? 0.4 : 0);

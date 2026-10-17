@@ -1,14 +1,16 @@
-// Light / dark / system theme handling.
+// Auto (system) / light / dim / dark theme handling. "dim" is a low-contrast
+// slate dark theme; renderers treat it as dark.
 import { emit } from "../state";
 
-export type ThemePref = "system" | "light" | "dark";
+export type ThemePref = "system" | "light" | "dim" | "dark";
+const ORDER: ThemePref[] = ["system", "light", "dim", "dark"];
 const KEY = "cytoflow.theme";
 const mq = window.matchMedia("(prefers-color-scheme: dark)");
 
 let pref: ThemePref = "system";
 try {
   const v = localStorage.getItem(KEY);
-  if (v === "light" || v === "dark" || v === "system") pref = v;
+  if (ORDER.includes(v as ThemePref)) pref = v as ThemePref;
 } catch {
   /* storage unavailable */
 }
@@ -28,8 +30,18 @@ export function initTheme(): void {
   apply();
 }
 
+export function setTheme(p: ThemePref): void {
+  pref = p;
+  try {
+    localStorage.setItem(KEY, pref);
+  } catch {
+    /* ignore */
+  }
+  apply();
+}
+
 export function cycleTheme(): ThemePref {
-  pref = pref === "system" ? "light" : pref === "light" ? "dark" : "system";
+  pref = ORDER[(ORDER.indexOf(pref) + 1) % ORDER.length];
   try {
     localStorage.setItem(KEY, pref);
   } catch {

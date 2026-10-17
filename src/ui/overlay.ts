@@ -79,13 +79,17 @@ export function initOverlay(): void {
 
 const dimKey = (d: GateDim | null) => (d ? `${d.channel}:${d.compensated ? 1 : 0}` : "-");
 
-async function fetchItem(it: OverlayItem, x: GateDim, y: GateDim | null): Promise<PlotData> {
-  const key = `${it.sampleId}|${it.gateId ?? ""}|${dimKey(x)}|${dimKey(y)}`;
+/** Visible display-space window of the graph (null = full axis). */
+export interface ViewRanges { x: [number, number] | null; y: [number, number] | null }
+
+async function fetchItem(it: OverlayItem, x: GateDim, y: GateDim | null, r: ViewRanges): Promise<PlotData> {
+  const key = `${it.sampleId}|${it.gateId ?? ""}|${dimKey(x)}|${dimKey(y)}|${r.x ?? ""}|${y ? r.y ?? "" : ""}`;
   const hit = cache.get(key);
   if (hit) return hit;
   const d: PlotData = y
-    ? { kind: "2d", plot: await api.plot2d(it.sampleId, it.gateId, x, y, 256, 15000) }
-    : { kind: "hist", hist: await api.plotHist(it.sampleId, it.gateId, x, 256) };
+    ? { kind: "2d", plot: await api.plot2d(it.sampleId, it.gateId, x, y, 256, 15000, r.x, r.y) }
+    : { kind: "hist", hist: await api.plotHist(it.sampleId, it.gateId, x, 256, r.x) };
+  if (cache.size > 64) cache.clear(); // zooming creates many keys
   cache.set(key, d);
   return d;
 }
@@ -110,11 +114,11 @@ function labelFor(it: OverlayItem, items: OverlayItem[]): string {
 }
 
 /** Fetch every series for the current axes (primary first). */
-export async function fetchSeries(x: GateDim, y: GateDim | null): Promise<Series[]> {
+export async function fetchSeries(x: GateDim, y: GateDim | null, ranges: ViewRanges = { x: null, y: null }): Promise<Series[]> {
   const items = overlayItems().filter((it) => isLoaded(it.sampleId));
   const out: Series[] = [];
   for (const [i, it] of items.entries()) {
-    out.push({ label: labelFor(it, items), color: GATE_COLORS[i % GATE_COLORS.length], data: await fetchItem(it, x, y) });
+    out.push({ label: labelFor(it, items), color: GATE_COLORS[i % GATE_COLORS.length], data: await fetchItem(it, x, y, ranges) });
   }
   return out;
 }

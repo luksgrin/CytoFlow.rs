@@ -2,11 +2,11 @@
 import { gate, selectPopulation, setTool, state, type Tool } from "../state";
 import { deleteGate, openFcs, openWorkspace, saveWorkspace } from "./actions";
 import { cancelDrawing, closePolygon, deleteSelectedGate } from "./gating";
-import { currentView } from "./graph";
+import { currentView, resetView } from "./graph";
 import { deleteSelectedPanel } from "./layout";
 import { modalOpen } from "./modal";
 
-const TOOL_KEYS: Record<string, Tool> = { v: "select", r: "rect", p: "polygon", e: "ellipse", g: "range", q: "quadrant" };
+const TOOL_KEYS: Record<string, Tool> = { v: "select", r: "rect", p: "polygon", l: "lasso", e: "ellipse", g: "range", q: "quadrant" };
 
 export function initShortcuts(): void {
   document.addEventListener("keydown", (e) => {
@@ -37,6 +37,7 @@ export function initShortcuts(): void {
       setTool(tool);
       return;
     }
+    if (!mod && !e.altKey && e.key === "0" && currentView() === "graph") return void (resetView() && e.preventDefault());
     if (e.key === "ArrowLeft" && e.altKey && state.gateId) selectPopulation(gate(state.gateId)?.parent ?? null);
   });
 }

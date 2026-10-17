@@ -1,5 +1,6 @@
 // Native file dialogs (Tauri plugin) with a text-prompt fallback in mock mode.
 import { isTauri } from "../ipc";
+import type { ExportFormat } from "../types";
 import { promptText } from "./modal";
 
 export interface Filter { name: string; extensions: string[] }
@@ -31,5 +32,21 @@ export async function pickSave(title: string, filters: Filter[], defaultPath: st
   }
   return promptText(title, "Save to (mock mode)", defaultPath);
 }
+
+/** Population export formats: label, save-dialog filter, extension. */
+export const EXPORT_FORMATS: Record<ExportFormat, { label: string; hint: string; filter: Filter[]; ext: string }> = {
+  csv: { label: "CSV", hint: "Plain text, one column per channel", filter: [{ name: "CSV", extensions: ["csv"] }], ext: "csv" },
+  xlsx: {
+    label: "Excel (.xlsx)", hint: "“metadata” sheet (keywords, population, settings) + “data” sheet",
+    filter: [{ name: "Excel workbook", extensions: ["xlsx"] }], ext: "xlsx",
+  },
+  parquet: {
+    label: "Parquet", hint: "Columnar, one float column per channel (pandas / polars / R arrow)",
+    filter: [{ name: "Apache Parquet", extensions: ["parquet"] }], ext: "parquet",
+  },
+};
+
+/** Replace (or add) the extension of a file name / path. */
+export const withExt = (p: string, ext: string) => `${p.replace(/\.(csv|xlsx|parquet)$/i, "")}.${ext}`;
 
 export const dirname = (p: string) => p.replace(/[\\/][^\\/]*$/, "") || "/";

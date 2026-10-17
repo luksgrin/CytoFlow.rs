@@ -68,6 +68,18 @@ fn ticks_for(ws: &Workspace, sample_id: Option<&str>, channel: &str) -> Vec<Tick
         .collect()
 }
 
+/// Ticks of a sample's channel for a (zoomed) display window.
+fn ticks_in(ws: &Workspace, sample_id: &str, channel: &str, range: [f32; 2]) -> Vec<Tick> {
+    if range == plot::FULL_RANGE {
+        return ticks_for(ws, Some(sample_id), channel);
+    }
+    ws.transform_for(sample_id, channel)
+        .ticks_in(range[0] as f64, range[1] as f64)
+        .into_iter()
+        .map(|(pos, label, major)| Tick { pos, label, major })
+        .collect()
+}
+
 /// Axis label for a channel of a sample, e.g. `FL1-H :: CD4 FITC`.
 fn axis_label(ws: &Workspace, sample_id: &str, dim: &GateDim) -> String {
     let base = ws
@@ -426,7 +438,8 @@ pub async fn plot_hist(
         let ws = &mut st.workspace;
         let mask = mask_for(ws, &sample_id, gate_id.as_deref())?;
         let xs = ws.transformed(&sample_id, &x.channel, x.compensated).map_err(err)?;
-        Ok((xs, mask, ticks_for(ws, Some(&sample_id), &x.channel), axis_label(ws, &sample_id, &x)))
+        let ticks = ticks_in(ws, &sample_id, &x.channel, plot::view_range(range));
+        Ok((xs, mask, ticks, axis_label(ws, &sample_id, &x)))
     })
     .await?;
     blocking(move || {
@@ -468,8 +481,8 @@ pub async fn plot_2d(
         let header = json!({
             "x_label": axis_label(ws, &sample_id, &x),
             "y_label": axis_label(ws, &sample_id, &y),
-            "x_ticks": ticks_for(ws, Some(&sample_id), &x.channel),
-            "y_ticks": ticks_for(ws, Some(&sample_id), &y.channel),
+            "x_ticks": ticks_in(ws, &sample_id, &x.channel, plot::view_range(x_range)),
+            "y_ticks": ticks_in(ws, &sample_id, &y.channel, plot::view_range(y_range)),
         });
         Ok((xs, ys, mask, header))
     })

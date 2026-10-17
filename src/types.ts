@@ -184,7 +184,12 @@ export interface Plot2DHeader {
   total: number;
   max_count: number;
   bins: number;
+  /** Display-space window the grid and points cover (echo of the request; full range by default). */
+  x_range?: [number, number];
+  y_range?: [number, number];
 }
+
+export type ExportFormat = "csv" | "xlsx" | "parquet";
 
 /** Parsed form of the `plot_2d` binary response. */
 export interface Plot2D {

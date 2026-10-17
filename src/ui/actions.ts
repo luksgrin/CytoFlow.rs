@@ -2,12 +2,12 @@
 import { api } from "../ipc";
 import { GATE_COLORS } from "../plot/colormap";
 import {
-  applyWorkspace, currentScope, flushPersistence, gate, groupById, groupsOf, isLoaded, sampleGate, sampleGates,
+  applyWorkspace, currentScope, flushPersistence, gate, gatePathIn, groupById, groupsOf, isLoaded, sampleGate, sampleGates,
   selectPopulation, state,
 } from "../state";
-import { ALL_SAMPLES, type GateNode, type GateScope } from "../types";
+import { ALL_SAMPLES, type ExportFormat, type GateNode, type GateScope } from "../types";
 import { h } from "./dom";
-import { dirname, pickDir, pickOpen, pickSave } from "./files";
+import { dirname, EXPORT_FORMATS, pickDir, pickOpen, pickSave, withExt } from "./files";
 import { alertBox, confirmBox, modal, popover, promptText } from "./modal";
 import { run, status } from "./status";
 
@@ -81,23 +81,65 @@ export const importWsp = () => run(async () => {
   if (p?.[0]) await importWith(p[0], [dirname(p[0])]);
 });
 
+const FORMAT_KEY = "cytoflow.exportFormat";
+function lastFormat(): ExportFormat {
+  try {
+    const v = localStorage.getItem(FORMAT_KEY);
+    if (v === "csv" || v === "xlsx" || v === "parquet") return v;
+  } catch {
+    /* storage unavailable */
+  }
+  return "csv";
+}
+
+/** Export the events of a population (default: the selected one, all channels) as CSV, XLSX or Parquet. */
 export const exportPopulation = () => run(async () => {
   const sid = state.sampleId;
   if (!sid || !isLoaded(sid)) return status.error("Select a loaded sample first");
+  const tree = sampleGates();
+  const pop = h("select", { class: "input", "data-role": "export-population" },
+    h("option", { value: "", text: "All events" }),
+    ...tree.map((g) => h("option", { value: g.id, text: gatePathIn(tree, g.id) })));
+  pop.value = state.gateId && tree.some((g) => g.id === state.gateId) ? state.gateId : "";
+  let format = lastFormat();
+  const hint = h("p", { class: "muted small" });
+  const fmtBtns = new Map<ExportFormat, HTMLButtonElement>();
+  const setFormat = (f: ExportFormat) => {
+    format = f;
+    fmtBtns.forEach((b, k) => b.classList.toggle("active", k === f));
+    hint.textContent = EXPORT_FORMATS[f].hint;
+  };
+  const fmtSeg = h("div", { class: "segmented", "data-role": "export-format" },
+    ...(Object.keys(EXPORT_FORMATS) as ExportFormat[]).map((f) => {
+      const b = h("button", { class: "seg-btn text", text: EXPORT_FORMATS[f].label, "data-format": f, onclick: () => setFormat(f) });
+      fmtBtns.set(f, b);
+      return b;
+    }));
+  setFormat(format);
   const comp = h("input", { type: "checkbox", checked: state.ws?.compensation.source !== "none" });
   const tr = h("input", { type: "checkbox" });
   const axesOnly = h("input", { type: "checkbox" });
   const body = h("div", { class: "form" },
-    h("p", { class: "muted", text: `Population: ${gate(state.gateId)?.name ?? "All events"}` }),
+    h("label", { class: "field" }, h("span", { text: "Population" }), pop),
+    h("div", { class: "field" }, h("span", { text: "Format" }), fmtSeg),
+    hint,
     h("label", { class: "check-row" }, comp, " Compensated values"),
     h("label", { class: "check-row" }, tr, " Transformed (display-space) values"),
-    h("label", { class: "check-row" }, axesOnly, " Only the channels on the current axes"));
+    h("label", { class: "check-row" }, axesOnly, " Only the channels on the current axes (default: all channels)"));
   if ((await modal("Export population", body, [{ label: "Cancel", value: "c" }, { label: "Export…", value: "ok", primary: true }], { onEnter: "ok" })) !== "ok") return;
-  const name = `${(gate(state.gateId)?.name ?? "All events").replace(/[^\w.-]+/g, "_")}.csv`;
-  const path = await pickSave("Export population CSV", CSV, name);
+  try {
+    localStorage.setItem(FORMAT_KEY, format);
+  } catch {
+    /* ignore */
+  }
+  const gateId = pop.value || null;
+  const spec = EXPORT_FORMATS[format];
+  const name = withExt((gate(gateId)?.name ?? "All events").replace(/[^\w.-]+/g, "_"), spec.ext);
+  let path = await pickSave(`Export population (${spec.label})`, spec.filter, name);
   if (!path) return;
+  if (!/\.[^\\/.]+$/.test(path)) path = withExt(path, spec.ext);
   const chans = axesOnly.checked ? [state.x?.channel, state.hist ? undefined : state.y?.channel].filter((c): c is string => !!c) : null;
-  const n = await api.exportPopulationCsv(sid, state.gateId, path, chans, comp.checked, tr.checked);
+  const n = await api.exportPopulation({ sampleId: sid, gateId, path, format, channels: chans, compensated: comp.checked, transformed: tr.checked });
   status.ok(`Wrote ${n.toLocaleString()} events to ${path}`);
 });
 
