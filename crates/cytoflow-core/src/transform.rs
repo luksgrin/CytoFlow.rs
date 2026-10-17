@@ -384,7 +384,14 @@ pub struct Biex {
 
 impl Biex {
     pub fn new(t: f64, width_basis: f64, pos: f64, neg: f64) -> Self {
-        let n = BIEX_CHANNELS;
+        Self::with_channels(t, width_basis, pos, neg, BIEX_CHANNELS)
+    }
+
+    /// The biex scale built over `n` table channels instead of
+    /// [`BIEX_CHANNELS`] (the channel count enters through the zero channel
+    /// `z = ⌊n·E / (E + D₀)⌋` and the derived total decades `D = n·E / z`).
+    pub fn with_channels(t: f64, width_basis: f64, pos: f64, neg: f64, channels: f64) -> Self {
+        let n = if channels >= 2.0 && channels.is_finite() { channels.floor() } else { BIEX_CHANNELS };
         let t = if t > 0.0 && t.is_finite() { t } else { 262144.0 };
         let pos = if pos > 0.0 && pos.is_finite() { pos } else { 4.5 };
         let neg = if neg.is_finite() { neg.max(0.0) } else { 0.0 };

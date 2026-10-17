@@ -247,10 +247,16 @@ impl TreeCtx<'_> {
                 //   flooring them to bins does not (flooring merges events 50
                 //   and 51 of that fixture).
                 // On logicle axes the same geometry undercounts FlowJo by 2-3 %
-                // (8_color_ICS_with_ellipse.wsp): consistent with FlowJo's
-                // logicle display grid being offset by about one grid unit
-                // from `256 · logicle(x)`, which no public description pins
-                // down; see tests/wsp_import.rs.
+                // (8_color_ICS_with_ellipse.wsp). Ruled out as explanations
+                // (tests/wsp_ellipse_explore.rs prints the counts): FlowJo's
+                // biex in place of the logicle (CytoML mapping, 4096-, 1024-
+                // or 256-channel tables), rounding/flooring the events,
+                // a bin-aligned logicle zero, a grid spanning the data range,
+                // polygonal ellipses. The deficit behaves like an offset of
+                // the logicle grid by ≈ −1.2 units (or, equivalently here,
+                // M ≈ 4.397 / W ≈ 1.025), which nothing in the workspace
+                // explains, so it is not applied; about 10-15 events of it
+                // come from the parent polygons. See tests/wsp_import.rs.
                 let res = shape_el.attr_f64("gateResolution").unwrap_or(256.0);
                 let pts = |name: &str| -> Vec<[f64; 2]> {
                     shape_el
