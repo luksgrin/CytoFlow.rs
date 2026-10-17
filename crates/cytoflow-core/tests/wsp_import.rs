@@ -85,15 +85,13 @@ fn run(wsp: &str, required: &str) -> Option<(WspImport, Vec<Row>)> {
         .iter()
         .map(|s| (s.id.clone(), s.name.clone(), s.event_count))
         .collect();
-    let gates: Vec<(String, String)> = ws
-        .gates
-        .iter()
-        .map(|g| (g.id.clone(), ws.gate_path(&g.id)))
-        .collect();
     for ec in &imp.expected_counts {
         let Some((sid, _, total)) = samples.iter().find(|(_, n, _)| *n == ec.sample_name) else {
             continue;
         };
+        if !ws.is_loaded(sid) {
+            continue;
+        }
         let parent_expected = match ec.gate_path.rsplit_once('/') {
             None => *total,
             Some((parent, _)) => imp
@@ -103,12 +101,18 @@ fn run(wsp: &str, required: &str) -> Option<(WspImport, Vec<Row>)> {
                 .map(|p| p.count)
                 .expect("parent count"),
         };
-        let Some((gid, _)) = gates.iter().find(|(_, p)| *p == ec.gate_path) else {
-            panic!(
-                "[{wsp}] population {} of {} was not imported",
-                ec.gate_path, ec.sample_name
-            );
-        };
+        // Each sample is evaluated with its own gate tree.
+        let gid = ws
+            .preorder(sid)
+            .into_iter()
+            .find(|g| ws.gate_path(sid, g) == ec.gate_path)
+            .unwrap_or_else(|| {
+                panic!(
+                    "[{wsp}] population {} of {} was not imported",
+                    ec.gate_path, ec.sample_name
+                )
+            });
+        let gid = &gid;
         let got = ws.count(sid, Some(gid)).expect("count");
         rows.push(Row {
             sample: ec.sample_name.clone(),
@@ -161,10 +165,30 @@ fn assert_within(wsp: &str, rows: &[Row], tol: f64) {
 #[test]
 fn ics_simple_polygons_rectangles_logicle_comp() {
     let wsp = "8_color_ICS_simple.wsp";
-    let Some((_, rows)) = run(wsp, "101_DEN084Y5_15_E03_009_clean.fcs") else {
+    let Some((imp, rows)) = run(wsp, "101_DEN084Y5_15_E03_009_clean.fcs") else {
         return;
     };
     assert_within(wsp, &rows, EXACT_TOL);
+    // Every sample is checked against its own FlowJo counts.
+    let loaded = imp.workspace.samples.iter().filter(|s| imp.workspace.is_loaded(&s.id)).count();
+    let names: std::collections::HashSet<&str> = rows.iter().map(|r| r.sample.as_str()).collect();
+    assert_eq!(names.len(), loaded, "[{wsp}] not every loaded sample was compared");
+    // Each sample has its own `Time` gain (a per-sample transform override).
+    // With it the Time rectangle of E03 and E05 is exact (E05 was 22 events
+    // short when the template sample's gain was shared). In E01 the gate
+    // minimum (1.28 s) sits 7.9e-5 display units above the axis minimum,
+    // inside FlowJo's first display bin, and FlowJo also counts the 2 events
+    // below it: an edge-of-axis rule of the rectangle gate, not a transform
+    // issue.
+    let time: Vec<&Row> = rows.iter().filter(|r| r.path == "Time").collect();
+    assert_eq!(time.len(), loaded);
+    for r in time {
+        if r.sample.contains("E01_008") {
+            assert!(r.got.abs_diff(r.expected) <= 2, "[{wsp}] {} Time: {} vs {}", r.sample, r.got, r.expected);
+        } else {
+            assert_eq!(r.got, r.expected, "[{wsp}] {} Time", r.sample);
+        }
+    }
 }
 
 /// Ellipsoid foci/edge vertices are on FlowJo's 256-step display grid (they
@@ -281,21 +305,42 @@ fn import_without_fcs_files() {
         "test_data_diamond_asinh_rect2.wsp",
         "test_data_diamond_biex_rect.wsp",
     ] {
+        // No search directory and a workspace path whose FCS files do not
+        // exist: every sample is added unloaded, with its own tree.
         let imp = import_wsp(testdata().join("wsp").join(wsp), &[]).expect(wsp);
-        assert!(!imp.workspace.gates.is_empty(), "{wsp}: no gates");
+        let ws = &imp.workspace;
+        assert!(!ws.samples.is_empty(), "{wsp}: no samples");
         assert!(!imp.expected_counts.is_empty(), "{wsp}: no counts");
-        let paths: Vec<String> = imp
-            .workspace
-            .gates
-            .iter()
-            .map(|g| imp.workspace.gate_path(&g.id))
-            .collect();
-        // Every population of the applied gate tree has a FlowJo count.
-        for p in &paths {
-            assert!(
-                imp.expected_counts.iter().any(|e| &e.gate_path == p),
-                "{wsp}: {p} has no count"
-            );
+        assert_eq!(ws.groups[0].name, "All Samples");
+        assert_eq!(ws.groups[0].sample_ids.len(), ws.samples.len());
+        for s in &ws.samples {
+            let tree = ws.sample_tree(&s.id).unwrap();
+            assert!(!tree.is_empty(), "{wsp}: {} has no gates", s.name);
+            // Every population of the sample's own tree has its FlowJo count.
+            for g in tree {
+                let p = ws.gate_path(&s.id, &g.id);
+                assert!(
+                    imp.expected_counts.iter().any(|e| e.gate_path == p && e.sample_name == s.name),
+                    "{wsp}: {} {p} has no count",
+                    s.name
+                );
+            }
+        }
+        // The same population path has the same id in every sample and group.
+        let mut by_path: std::collections::HashMap<String, String> = Default::default();
+        for s in &ws.samples {
+            for g in ws.sample_tree(&s.id).unwrap() {
+                let p = ws.gate_path(&s.id, &g.id);
+                assert_eq!(by_path.entry(p.clone()).or_insert(g.id.clone()), &g.id, "{wsp}: {p}");
+            }
+        }
+        for grp in &ws.groups {
+            for g in &grp.gates {
+                let p = ws.group_gate_path(&grp.id, &g.id);
+                if let Some(id) = by_path.get(&p) {
+                    assert_eq!(id, &g.id, "{wsp}: group {} {p}", grp.name);
+                }
+            }
         }
         assert!(
             !imp.warnings
@@ -304,5 +349,109 @@ fn import_without_fcs_files() {
             "{wsp}: {:?}",
             imp.warnings
         );
+    }
+}
+
+/// Per-sample trees: tailoring one sample's gate (or its transform) does not
+/// change any other sample; group edits skip tailored copies; pushing a
+/// tailored gate to its group resets every member's copy.
+#[test]
+fn tailoring_one_sample_does_not_change_another() {
+    use cytoflow_core::workspace::GateScope;
+    use cytoflow_core::{GateShape, Transform};
+    let large = testdata().join("large");
+    if !large.join("101_DEN084Y5_15_E05_010_clean.fcs").exists() {
+        eprintln!("skipping: 8-colour FCS files not found in testdata/large");
+        return;
+    }
+    let mut imp = import_wsp(testdata().join("wsp/8_color_ICS_simple.wsp"), &[large]).expect("import");
+    let ws = &mut imp.workspace;
+    let ids: Vec<String> = ws.samples.iter().map(|s| s.id.clone()).collect();
+    assert_eq!(ids.len(), 3);
+    let (a, b) = (ids[0].clone(), ids[1].clone());
+    let den = ws.groups.iter().find(|g| g.name == "DEN").expect("DEN group").id.clone();
+    assert_eq!(ws.group(&den).unwrap().sample_ids, ids);
+    let find = |ws: &cytoflow_core::Workspace, sid: &str, path: &str| {
+        ws.preorder(sid).into_iter().find(|g| ws.gate_path(sid, g) == path).unwrap()
+    };
+    let singlets = find(ws, &a, "Time/Singlets");
+    assert_eq!(singlets, find(ws, &b, "Time/Singlets"), "ids are shared across samples");
+    assert!(ws.group_gate(&den, &singlets).is_ok(), "the group template has the same id");
+    // Each sample keeps its own Time gain as a transform override.
+    assert!(ws.transform_for(&a, "Time") != ws.transform_for(&b, "Time"));
+
+    let count_b = ws.count(&b, Some(&singlets)).unwrap();
+    let shape_b = ws.gate(&b, &singlets).unwrap().gate.shape.clone();
+    let count_a = ws.count(&a, Some(&singlets)).unwrap();
+
+    // Tailor sample A: shrink its Singlets polygon towards the centroid.
+    let mut shrunk = ws.gate(&a, &singlets).unwrap().gate.shape.clone();
+    if let GateShape::Polygon { vertices, .. } = &mut shrunk {
+        let n = vertices.len() as f64;
+        let cx = vertices.iter().map(|v| v[0]).sum::<f64>() / n;
+        let cy = vertices.iter().map(|v| v[1]).sum::<f64>() / n;
+        for v in vertices.iter_mut() {
+            v[0] = cx + 0.5 * (v[0] - cx);
+            v[1] = cy + 0.5 * (v[1] - cy);
+        }
+    } else {
+        panic!("Singlets is a polygon");
+    }
+    ws.update_gate_in(&GateScope::Sample(a.clone()), &singlets, Some(shrunk.clone()), None, None, None).unwrap();
+    assert!(ws.sample_gate(&a, &singlets).unwrap().tailored);
+    assert!(!ws.sample_gate(&b, &singlets).unwrap().tailored);
+    assert!(ws.count(&a, Some(&singlets)).unwrap() < count_a);
+    assert_eq!(ws.count(&b, Some(&singlets)).unwrap(), count_b);
+    assert_eq!(ws.gate(&b, &singlets).unwrap().gate.shape, shape_b);
+
+    // A sample-only transform change re-maps only that sample's gates.
+    let t = Transform::Logicle { t: 262144.0, w: 0.5, m: 4.5, a: 0.0 };
+    ws.set_sample_transform(&a, "FSC-A", t).unwrap();
+    assert_eq!(ws.gate(&b, &singlets).unwrap().gate.shape, shape_b);
+    assert_eq!(ws.count(&b, Some(&singlets)).unwrap(), count_b);
+
+    // A group edit reaches B but skips A's tailored copy.
+    let tailored_a = ws.gate(&a, &singlets).unwrap().gate.shape.clone();
+    let mut tmpl = ws.group_gate(&den, &singlets).unwrap().gate.shape.clone();
+    if let GateShape::Polygon { vertices, .. } = &mut tmpl {
+        vertices[0][0] += 0.01;
+    }
+    ws.update_gate_in(&GateScope::Group(den.clone()), &singlets, Some(tmpl), Some("Single cells"), None, None).unwrap();
+    assert_eq!(ws.gate(&a, &singlets).unwrap().gate.shape, tailored_a);
+    assert_eq!(ws.gate(&a, &singlets).unwrap().name, "Single cells", "names follow the group");
+    assert!(ws.gate(&b, &singlets).unwrap().gate.shape != shape_b);
+
+    // Push A's tailored gate to the group: every member follows it.
+    ws.copy_gate_to_group(&singlets, &a, &den).unwrap();
+    assert!(!ws.sample_gate(&a, &singlets).unwrap().tailored);
+    let c = ids[2].clone();
+    for s in [&b, &c] {
+        // B and C use the default FSC-A transform, A an override: the copies
+        // agree with the template, which is A's gate in the default space.
+        let GateShape::Polygon { vertices: vs, .. } = &ws.gate(s, &singlets).unwrap().gate.shape else { panic!() };
+        let GateShape::Polygon { vertices: vt, .. } = &ws.group_gate(&den, &singlets).unwrap().gate.shape else { panic!() };
+        for (p, q) in vs.iter().zip(vt) {
+            assert!((p[0] - q[0]).abs() < 1e-9 && (p[1] - q[1]).abs() < 1e-9);
+        }
+        assert!(!ws.sample_gate(s, &singlets).unwrap().tailored);
+    }
+    // ... and A's raw-space gate is unchanged by the round trip.
+    let GateShape::Polygon { vertices: va, .. } = &ws.gate(&a, &singlets).unwrap().gate.shape else { panic!() };
+    let GateShape::Polygon { vertices: vta, .. } = &tailored_a else { panic!() };
+    for (p, q) in va.iter().zip(vta) {
+        assert!((p[0] - q[0]).abs() < 1e-6 && (p[1] - q[1]).abs() < 1e-6);
+    }
+
+    // Removing a gate from one sample leaves the others alone; removing it
+    // from the group removes it (and its descendants) everywhere.
+    let amine = find(ws, &a, "Time/Single cells/aAmine-");
+    ws.remove_gate_in(&GateScope::Sample(a.clone()), &amine).unwrap();
+    assert!(ws.gate(&a, &amine).is_err());
+    assert!(ws.gate(&b, &amine).is_ok());
+    let removed = ws.remove_gate_in(&GateScope::Group(den.clone()), &singlets).unwrap();
+    assert!(removed.contains(&amine));
+    for s in &ids {
+        assert!(ws.gate(s, &singlets).is_err());
+        assert!(ws.gate(s, &amine).is_err());
     }
 }

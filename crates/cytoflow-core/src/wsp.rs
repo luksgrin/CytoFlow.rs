@@ -7,16 +7,17 @@
 //!
 //! Imported: sample list, per-channel transforms (`linear`, `log`, `logicle`,
 //! `fasinh`, FlowJo `biex` approximated as logicle), the first spillover
-//! matrix, and the population tree (rectangle/quadrant, polygon, ellipsoid
-//! and boolean `And/Or/Not` nodes) of each sample.
+//! matrix, the population tree (rectangle/quadrant, polygon, ellipsoid
+//! and boolean `And/Or/Not` nodes) of each sample, and the sample groups with
+//! their template trees.
 
 use crate::compensation::CompMatrix;
 use crate::error::{Error, Result};
 use crate::gate::{BoolOp, GateDim, GateNode, GateShape};
 use crate::transform::Transform;
-use crate::workspace::{ChannelSetting, CompSource, Workspace};
+use crate::workspace::{ChannelSetting, CompSource, SampleGate, Workspace, ALL_SAMPLES_NAME};
 use crate::xml::{self, Element};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,15 +35,6 @@ pub struct WspImport {
     pub expected_counts: Vec<ExpectedCount>,
     /// Samples whose FCS files could not be found.
     pub missing_files: Vec<(String, PathBuf)>,
-}
-
-#[derive(Debug, Clone)]
-struct WspSample {
-    name: String,
-    path: PathBuf,
-    transforms: BTreeMap<String, Transform>,
-    tree: Vec<GateNode>,
-    counts: Vec<(String, usize)>,
 }
 
 /// FlowJo's biexponential (`width` basis, `pos` decades, `neg` decades) mapped
@@ -315,8 +307,71 @@ impl TreeCtx<'_> {
     }
 }
 
+/// Gate trees are walked per sample with sample-local ids; this map gives the
+/// same population path the same workspace id in every sample and group, so
+/// that a gate edited through a group finds its copy in every member.
+#[derive(Default)]
+struct IdMap {
+    by_path: HashMap<String, String>,
+    next: usize,
+}
+
+impl IdMap {
+    fn id_for(&mut self, path: &str) -> String {
+        if let Some(id) = self.by_path.get(path) {
+            return id.clone();
+        }
+        self.next += 1;
+        let id = format!("g{}", self.next);
+        self.by_path.insert(path.to_string(), id.clone());
+        id
+    }
+
+    /// Rewrite the local ids of a walked tree (`local`: path → local id) to workspace ids.
+    fn relabel(&mut self, tree: &mut [GateNode], local: &HashMap<String, String>) {
+        let mut map: HashMap<String, String> = HashMap::new();
+        // Assign new ids in tree order so that ids follow the population order.
+        for n in tree.iter() {
+            if let Some((path, _)) = local.iter().find(|(_, lid)| **lid == n.id) {
+                map.insert(n.id.clone(), self.id_for(path));
+            }
+        }
+        let get = |id: &str| map.get(id).cloned().unwrap_or_else(|| id.to_string());
+        for n in tree.iter_mut() {
+            n.id = get(&n.id);
+            n.parent = n.parent.as_deref().map(get);
+            if let GateShape::Boolean { refs, .. } = &mut n.gate.shape {
+                for r in refs.iter_mut() {
+                    *r = get(r);
+                }
+            }
+        }
+    }
+}
+
+/// A walked tree (local ids), its path → local id map and the FlowJo counts.
+type Walked = (Vec<GateNode>, HashMap<String, String>, Vec<(String, usize)>);
+
+/// Walk a `<Subpopulations>` element with the given transforms.
+fn walk_tree(subpops: Option<&Element>, prefixes: &[String], tr: &Transforms, warnings: &mut Vec<String>) -> Walked {
+    let mut tree = Vec::new();
+    let mut ctx = TreeCtx { prefixes, transforms: &tr.transforms, coord_scale: &tr.coord_scale, warnings, counts: Vec::new(), next_id: 1, path_to_id: HashMap::new() };
+    if let Some(sub) = subpops {
+        ctx.walk(sub, None, "", &mut tree);
+    }
+    (tree, ctx.path_to_id, ctx.counts)
+}
+
 /// Parse a `.wsp` file. FCS files are searched next to the workspace (and one
 /// directory level below) when the recorded absolute path does not exist.
+///
+/// Each sample keeps its own gate tree and its own transforms (stored as
+/// per-sample overrides of the workspace defaults, which are taken from the
+/// sample with the largest tree). `<Groups>` become groups whose
+/// `<Subpopulations>` are the templates; a sample's gate is marked `tailored`
+/// when a group of that sample has the same population with a different
+/// gate. Samples whose FCS file is missing are still added (not loaded) so
+/// that their trees are kept.
 pub fn import_wsp<P: AsRef<Path>>(path: P, search_dirs: &[PathBuf]) -> Result<WspImport> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path)?;
@@ -361,42 +416,123 @@ pub fn import_wsp<P: AsRef<Path>>(path: P, search_dirs: &[PathBuf]) -> Result<Ws
         warnings.push(format!("{} distinct compensation matrices found; using the first", matrices.len()));
     }
 
-    // Samples.
-    let mut samples: Vec<WspSample> = Vec::new();
+    // Samples: transforms first, so that the defaults are known before the
+    // trees are converted.
+    struct RawSample<'a> {
+        wsp_id: Option<String>,
+        name: String,
+        path: PathBuf,
+        tr: Transforms,
+        subpops: Option<&'a Element>,
+        size: usize,
+    }
+    let mut raws: Vec<RawSample> = Vec::new();
     if let Some(list) = root.child("SampleList") {
         for s in list.children_named("Sample") {
-            let uri = s.child("DataSet").and_then(|d| d.attr("uri")).unwrap_or_default();
+            let ds = s.child("DataSet");
+            let uri = ds.and_then(|d| d.attr("uri")).unwrap_or_default();
             let node = s.child("SampleNode");
             let name = node.and_then(|n| n.attr("name")).map(String::from).unwrap_or_else(|| uri_to_path(uri).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default());
-            let Transforms { transforms, coord_scale } = s
-                .child("Transformations")
-                .map(|t| parse_transforms(t, &prefixes))
-                .unwrap_or(Transforms { transforms: BTreeMap::new(), coord_scale: BTreeMap::new() });
-            let mut tree = Vec::new();
-            let mut ctx = TreeCtx { prefixes: &prefixes, transforms: &transforms, coord_scale: &coord_scale, warnings: &mut warnings, counts: Vec::new(), next_id: 1, path_to_id: HashMap::new() };
-            if let Some(sub) = node.and_then(|n| n.child("Subpopulations")) {
-                ctx.walk(sub, None, "", &mut tree);
-            }
-            let counts = ctx.counts;
-            samples.push(WspSample { name, path: uri_to_path(uri), transforms, tree, counts });
+            let wsp_id = node.and_then(|n| n.attr("sampleID")).or_else(|| ds.and_then(|d| d.attr("sampleID"))).map(String::from);
+            let tr = s.child("Transformations").map(|t| parse_transforms(t, &prefixes)).unwrap_or(Transforms { transforms: BTreeMap::new(), coord_scale: BTreeMap::new() });
+            let subpops = node.and_then(|n| n.child("Subpopulations"));
+            let size = subpops.map(|e| e.descendants("Population").len()).unwrap_or(0);
+            raws.push(RawSample { wsp_id, name, path: uri_to_path(uri), tr, subpops, size });
         }
     }
-    if samples.is_empty() {
+    if raws.is_empty() {
         warnings.push("workspace has no samples".into());
     }
 
-    // Build the workspace: transforms first so that samples keep them.
-    let ws_name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Imported".into());
-    let mut ws = Workspace::new(&ws_name);
-    let template = samples.iter().max_by_key(|s| s.tree.len()).cloned();
-    if let Some(t) = &template {
-        for (ch, tr) in &t.transforms {
-            ws.channel_settings.insert(ch.clone(), ChannelSetting { transform: tr.clone() });
+    // Workspace defaults: the transforms of the (first) sample with the
+    // largest tree, completed by the other samples'.
+    let template = raws.iter().enumerate().max_by_key(|(i, r)| (r.size, std::cmp::Reverse(*i))).map(|(i, _)| i);
+    let mut defaults: BTreeMap<String, Transform> = BTreeMap::new();
+    let mut default_scale: BTreeMap<String, f64> = BTreeMap::new();
+    if let Some(t) = template {
+        defaults = raws[t].tr.transforms.clone();
+        default_scale = raws[t].tr.coord_scale.clone();
+    }
+    for r in &raws {
+        for (ch, t) in &r.tr.transforms {
+            defaults.entry(ch.clone()).or_insert_with(|| t.clone());
         }
     }
-    for s in &samples {
-        for (ch, tr) in &s.transforms {
-            ws.channel_settings.entry(ch.clone()).or_insert(ChannelSetting { transform: tr.clone() });
+    // A sample converts its gates with its own transforms, falling back to the defaults.
+    let effective = |r: &RawSample| -> Transforms {
+        let mut t = defaults.clone();
+        t.extend(r.tr.transforms.iter().map(|(k, v)| (k.clone(), v.clone())));
+        Transforms { transforms: t, coord_scale: r.tr.coord_scale.clone() }
+    };
+    let default_tr = Transforms { transforms: defaults.clone(), coord_scale: default_scale };
+
+    let mut ids = IdMap::default();
+    let mut trees: Vec<Vec<GateNode>> = Vec::new();
+    let mut counts: Vec<Vec<(String, usize)>> = Vec::new();
+    for r in &raws {
+        let (mut tree, local, c) = walk_tree(r.subpops, &prefixes, &effective(r), &mut warnings);
+        ids.relabel(&mut tree, &local);
+        trees.push(tree);
+        counts.push(c);
+    }
+
+    // Groups (templates in the default transform space).
+    struct RawGroup<'a> {
+        name: String,
+        members: Vec<String>,
+        subpops: Option<&'a Element>,
+        tree: Vec<GateNode>,
+    }
+    let mut groups: Vec<RawGroup> = Vec::new();
+    if let Some(gs) = root.child("Groups") {
+        for g in gs.children_named("GroupNode") {
+            let name = g.attr("name").or_else(|| g.child("Group").and_then(|x| x.attr("name"))).unwrap_or("Group").to_string();
+            let members: Vec<String> = g
+                .child("Group")
+                .and_then(|x| x.child("SampleRefs"))
+                .map(|refs| refs.children_named("SampleRef").filter_map(|r| r.attr("sampleID").map(String::from)).collect())
+                .unwrap_or_default();
+            let subpops = g.child("Subpopulations");
+            let (mut tree, local, _) = walk_tree(subpops, &prefixes, &default_tr, &mut warnings);
+            ids.relabel(&mut tree, &local);
+            groups.push(RawGroup { name, members, subpops, tree });
+        }
+    }
+
+    // Tailored: the sample's gate differs from the same population of the
+    // template of one of its groups (converted with the sample's transforms).
+    let mut tailored: Vec<HashSet<String>> = vec![HashSet::new(); raws.len()];
+    for (k, r) in raws.iter().enumerate() {
+        let eff = effective(r);
+        for g in &groups {
+            let member = g.name == ALL_SAMPLES_NAME || r.wsp_id.as_ref().is_some_and(|id| g.members.contains(id));
+            if !member || g.tree.is_empty() {
+                continue;
+            }
+            let mut quiet = Vec::new();
+            let (mut t, local, _) = walk_tree(g.subpops, &prefixes, &eff, &mut quiet);
+            ids.relabel(&mut t, &local);
+            for n in &trees[k] {
+                if let Some(tn) = t.iter().find(|x| x.id == n.id) {
+                    if tn.gate != n.gate || tn.name != n.name {
+                        tailored[k].insert(n.id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Build the workspace.
+    let ws_name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Imported".into());
+    let mut ws = Workspace::new(&ws_name);
+    for (ch, tr) in &defaults {
+        ws.channel_settings.insert(ch.clone(), ChannelSetting { transform: tr.clone() });
+    }
+    // Channels used by gates but without a FlowJo transform were converted
+    // with the linear fallback; make that the default so the gates keep their meaning.
+    for n in trees.iter().flatten().chain(groups.iter().flat_map(|g| g.tree.iter())) {
+        for d in n.gate.shape.dims() {
+            ws.channel_settings.entry(d.channel.clone()).or_insert(ChannelSetting { transform: Transform::Linear { t: 262144.0, a: 0.0 } });
         }
     }
 
@@ -406,31 +542,53 @@ pub fn import_wsp<P: AsRef<Path>>(path: P, search_dirs: &[PathBuf]) -> Result<Ws
     if let Some(d) = path.parent() {
         dirs.push(d.to_path_buf());
     }
-    for s in &samples {
-        let resolved = resolve_file(&s.path, &dirs);
-        match resolved {
-            Some(p) => {
-                if let Err(e) = ws.add_sample(&p) {
-                    warnings.push(format!("sample {}: {e}", s.name));
-                }
-            }
-            None => missing.push((s.name.clone(), s.path.clone())),
+    let mut wsp_to_sid: HashMap<String, String> = HashMap::new();
+    for (k, r) in raws.iter().enumerate() {
+        for (gp, c) in &counts[k] {
+            expected_counts.push(ExpectedCount { sample_name: r.name.clone(), gate_path: gp.clone(), count: *c });
         }
-        for (gp, c) in &s.counts {
-            expected_counts.push(ExpectedCount { sample_name: s.name.clone(), gate_path: gp.clone(), count: *c });
+        let sid = match resolve_file(&r.path, &dirs) {
+            Some(p) => match ws.add_sample(&p) {
+                Ok(id) => id,
+                Err(e) => {
+                    warnings.push(format!("sample {}: {e}", r.name));
+                    continue;
+                }
+            },
+            None => {
+                missing.push((r.name.clone(), r.path.clone()));
+                ws.add_unloaded_sample(&r.name, &r.path)
+            }
+        };
+        if let Some(w) = &r.wsp_id {
+            wsp_to_sid.insert(w.clone(), sid.clone());
+        }
+        if let Some(sample) = ws.samples.iter_mut().find(|s| s.id == sid) {
+            sample.name = r.name.clone();
+        }
+        let tree = trees[k].iter().map(|n| SampleGate::new(n.clone(), tailored[k].contains(&n.id))).collect();
+        ws.sample_gates.insert(sid.clone(), tree);
+        for (ch, t) in &r.tr.transforms {
+            if ws.channel_settings.get(ch).map(|c| &c.transform) != Some(t) {
+                ws.sample_channel_settings.entry(sid.clone()).or_default().insert(ch.clone(), ChannelSetting { transform: t.clone() });
+            }
+        }
+    }
+    for g in groups {
+        if g.name == ALL_SAMPLES_NAME {
+            ws.groups[0].gates = g.tree;
+            continue;
+        }
+        let members: Vec<String> = g.members.iter().filter_map(|m| wsp_to_sid.get(m).cloned()).collect();
+        let gid = ws.create_group(&g.name, &members)?;
+        if let Some(grp) = ws.groups.iter_mut().find(|x| x.id == gid) {
+            grp.gates = g.tree;
         }
     }
     if let Some(m) = matrices.into_iter().next() {
         ws.set_compensation(CompSource::Custom { matrix: m });
     } else {
         ws.set_compensation(CompSource::None);
-    }
-    if let Some(t) = template {
-        ws.gates = t.tree;
-        let differing = samples.iter().filter(|s| s.tree.len() != ws.gates.len()).count();
-        if differing > 0 {
-            warnings.push(format!("{differing} sample(s) have a different gate tree; the largest tree was applied to all samples"));
-        }
     }
     Ok(WspImport { workspace: ws, warnings, expected_counts, missing_files: missing })
 }
