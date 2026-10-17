@@ -938,7 +938,9 @@ impl Workspace {
             shape => {
                 let dims: Vec<GateDim> = shape.dims().into_iter().cloned().collect();
                 let mut cols: Vec<Arc<Vec<f32>>> = dims.iter().map(|d| self.transformed(sample_id, &d.channel, d.compensated)).collect::<Result<_>>()?;
-                if let (Some(g), GateShape::Polygon { .. }) = (node.gate.grid, shape) {
+                // Any shape with a display grid is evaluated on snapped events
+                // (set by the .wsp importer per gate type; see `Gate::grid`).
+                if let Some(g) = node.gate.grid {
                     cols = cols.iter().map(|c| Arc::new(crate::gate::snap_to_grid(c, g))).collect();
                 }
                 let refs: Vec<&[f32]> = cols.iter().map(|c| c.as_slice()).collect();
