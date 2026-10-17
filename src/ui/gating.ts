@@ -1,17 +1,18 @@
 // Gate overlay: draws child gates on the plot, drawing tools and gate editing.
 import { api } from "../ipc";
 import {
-  contains, dragHandle, fromView, handles, labelAnchor, type Mapping, moveShape, normalize, outline,
+  contains, dragHandle, fromView, handles, type Mapping, moveShape, normalize, outline,
   type Pt, toView, type ViewAxes, type VShape,
 } from "../plot/gates";
+import { movedShape, QUAD_SIGNS, quadIndex, quadToView, type QuadSet, type QuadView } from "../plot/quadrants";
 import { readTheme } from "../plot/render";
 import { clampD, type Frame, fromPx, fromPy, toPx, toPy } from "../plot/scale";
 import {
   applyWorkspace, children, gate, nextGateName, selectPopulation, setPlotGate, shortName, state, statFor,
 } from "../state";
-import type { GateDim, GateNode, GateShape, PopulationStats } from "../types";
+import type { GateDim, GateNode, GateShape } from "../types";
 import { chooseColor, deleteGate, renameGate, toggleNegate } from "./actions";
-import { fmtPct, pct } from "./dom";
+import { drawGates, quadSetsOf } from "./gatedraw";
 import type { GraphCtx } from "./graph";
 import { promptText, showMenu } from "./modal";
 import { gateColor } from "./workspace";
@@ -34,9 +35,19 @@ interface Edit {
   changed: boolean;
 }
 
+/** Dragging the shared centre / a divider line of a linked quadrant set. */
+interface QuadEdit {
+  qv: QuadView;
+  axis: "both" | "x" | "y";
+  start: Pt;
+  c: Pt;
+  changed: boolean;
+}
+
 let g: GraphCtx;
 let draft: Draft | null = null;
 let edit: Edit | null = null;
+let qedit: QuadEdit | null = null;
 let busy = false;
 
 const HANDLE_R = 7;
@@ -88,9 +99,29 @@ function hitHandle(px: number, py: number): { vis: Visible; id: string } | null 
   const axes = g.axes();
   if (!axes || !state.plotGate) return null;
   const vis = visibleGates(axes, state.gateId).find((x) => x.node.id === state.plotGate);
-  if (!vis) return null;
+  if (!vis || quadMember(vis.node.id)) return null;
   const f = g.frame();
   for (const hd of handles(vis.v)) if (Math.hypot(toPx(f, hd.p[0]) - px, toPy(f, hd.p[1]) - py) <= HANDLE_R) return { vis, id: hd.id };
+  return null;
+}
+
+function visibleQuads(axes: ViewAxes): QuadView[] {
+  return quadSetsOf(state.gateId).map((q) => quadToView(q, axes)).filter((q): q is QuadView => !!q);
+}
+
+const quadMember = (id: string): QuadSet | null => quadIndex(quadSetsOf(state.gateId)).get(id) ?? null;
+
+/** Hit-test the centre (both dividers) or one divider line of a visible quadrant set. */
+function hitQuad(px: number, py: number): { qv: QuadView; axis: QuadEdit["axis"] } | null {
+  const axes = g.axes();
+  if (!axes?.y) return null;
+  const f = g.frame();
+  for (const qv of visibleQuads(axes)) {
+    const cx = toPx(f, qv.c[0]), cy = toPy(f, qv.c[1]);
+    if (Math.hypot(cx - px, cy - py) <= HANDLE_R + 1) return { qv, axis: "both" };
+    if (Math.abs(cx - px) <= 4) return { qv, axis: "x" };
+    if (Math.abs(cy - py) <= 4) return { qv, axis: "y" };
+  }
   return null;
 }
 
@@ -102,72 +133,6 @@ function path(ctx: CanvasRenderingContext2D, f: Frame, pts: Pt[], close = true):
   if (close) ctx.closePath();
 }
 
-function label(ctx: CanvasRenderingContext2D, f: Frame, v: VShape, text: string, color: string, compact: boolean): void {
-  let [ax, ay] = labelAnchor(v);
-  if (v.t === "rect" && v.min[1] === null && v.max[1] === null) ay = 0.93;
-  const x = toPx(f, clampD(ax)), y = toPy(f, clampD(ay));
-  ctx.font = `${compact ? 9 : 11}px -apple-system, BlinkMacSystemFont, sans-serif`;
-  const w = ctx.measureText(text).width + 8;
-  const hgt = compact ? 13 : 16;
-  const lx = Math.min(Math.max(x - w / 2, f.left + 2), f.left + f.w - w - 2);
-  const ly = Math.min(Math.max(y - hgt / 2, f.top + 2), f.top + f.h - hgt - 2);
-  ctx.fillStyle = "rgba(0,0,0,0.62)";
-  ctx.beginPath();
-  if (typeof ctx.roundRect === "function") ctx.roundRect(lx, ly, w, hgt, 3);
-  else ctx.rect(lx, ly, w, hgt);
-  ctx.fill();
-  ctx.fillStyle = "#fff";
-  ctx.textAlign = "left";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, lx + 4, ly + hgt / 2 + 0.5);
-  ctx.strokeStyle = color;
-}
-
-/**
- * Draw the child gates of `parent` that match the current axes (plus the parent's own
- * outline, faintly). Shared with the batch view.
- */
-export function drawGates(
-  ctx: CanvasRenderingContext2D, f: Frame, axes: ViewAxes, parent: string | null,
-  stats: (id: string) => PopulationStats | null, opts: { compact?: boolean; selected?: string | null; editV?: VShape | null } = {},
-): void {
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(f.left, f.top, f.w, f.h);
-  ctx.clip();
-  const own = gate(parent);
-  const ownView = own ? toView(own.gate.shape, axes) : null;
-  if (ownView) {
-    ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = readTheme().muted;
-    ctx.lineWidth = 1;
-    path(ctx, f, outline(ownView.v));
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-  for (const node of children(parent)) {
-    const r = toView(node.gate.shape, axes);
-    if (!r) continue;
-    const v = opts.selected === node.id && opts.editV ? opts.editV : r.v;
-    const col = gateColor(node);
-    const sel = opts.selected === node.id;
-    path(ctx, f, outline(v));
-    ctx.globalAlpha = sel ? 0.12 : 0.06;
-    ctx.fillStyle = col;
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.lineWidth = sel ? 2.2 : opts.compact ? 1 : 1.5;
-    ctx.strokeStyle = col;
-    if (node.gate.negate) ctx.setLineDash([6, 3]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    const st = stats(node.id);
-    const txt = `${opts.compact ? "" : `${node.name} `}${st ? fmtPct(pct(st.count, st.parent_count)) + "%" : ""}`.trim();
-    if (txt) label(ctx, f, v, txt, col, !!opts.compact);
-  }
-  ctx.restore();
-}
-
 export function drawOverlay(): void {
   if (!g) return;
   const f = g.frame();
@@ -177,10 +142,24 @@ export function drawOverlay(): void {
   ctx.clearRect(0, 0, f.cssW, f.cssH);
   const axes = g.axes();
   if (!axes || !g.data()) return;
-  drawGates(ctx, f, axes, state.gateId, statFor, { selected: state.plotGate, editV: edit?.v ?? null });
-  // Handles for the selected gate
+  const quadEdit = qedit ? { id: qedit.qv.set.ids.pp, c: qedit.c } : null;
+  drawGates(ctx, f, axes, state.gateId, statFor, { selected: state.plotGate, editV: edit?.v ?? null, quadEdit });
+  // Handles for the selected gate (quadrant members use the shared centre instead)
   const sel = state.plotGate ? visibleGates(axes, state.gateId).find((x) => x.node.id === state.plotGate) : null;
-  if (sel && state.tool === "select") {
+  const selQuad = sel ? quadMember(sel.node.id) : null;
+  if (selQuad && state.tool === "select") {
+    const qv = visibleQuads(axes).find((q) => q.set.ids.pp === selQuad.ids.pp);
+    const c = qedit?.c ?? qv?.c;
+    if (c) {
+      ctx.fillStyle = "#fff";
+      ctx.strokeStyle = gateColor(sel!.node);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.rect(toPx(f, c[0]) - 4.5, toPy(f, c[1]) - 4.5, 9, 9);
+      ctx.fill();
+      ctx.stroke();
+    }
+  } else if (sel && state.tool === "select") {
     ctx.fillStyle = "#fff";
     ctx.strokeStyle = gateColor(sel.node);
     ctx.lineWidth = 1.5;
@@ -251,10 +230,21 @@ function finishQuadrant(p: Pt, x: GateDim, y: GateDim): void {
   }).finally(() => (busy = false));
 }
 
+/** Move all four members of a quadrant set to new dividers (gate-dim order). */
+export async function moveQuadSet(q: QuadSet, c: [number, number]): Promise<void> {
+  let last = null;
+  for (const s of QUAD_SIGNS) {
+    const node = gate(q.ids[s]);
+    if (node) last = await api.gateUpdate(node.id, { shape: movedShape(node.gate.shape, c) });
+  }
+  if (last) await applyWorkspace(last);
+}
+
 export function cancelDrawing(): boolean {
-  const had = !!draft || !!edit || !!state.plotGate;
+  const had = !!draft || !!edit || !!qedit || !!state.plotGate;
   draft = null;
   edit = null;
+  qedit = null;
   if (state.plotGate) setPlotGate(null);
   drawOverlay();
   return had;
@@ -289,9 +279,16 @@ function onDown(e: PointerEvent): void {
   const tool = state.tool;
   if (tool === "select") {
     const hh = hitHandle(px, py);
+    const hq = hh ? null : hitQuad(px, py);
+    if (hq) {
+      qedit = { qv: hq.qv, axis: hq.axis, start: p, c: hq.qv.c, changed: false };
+      g.overlay.setPointerCapture(e.pointerId);
+      return;
+    }
     const vis = hh?.vis ?? hitGate(p);
     if (!vis) return setPlotGate(null);
     if (state.plotGate !== vis.node.id) setPlotGate(vis.node.id);
+    if (quadMember(vis.node.id)) return; // quadrants move together via the centre / dividers
     edit = { id: vis.node.id, m: vis.m, orig: vis.node.gate.shape, start: p, startV: vis.v, v: vis.v, handle: hh?.id ?? null, changed: false };
     g.overlay.setPointerCapture(e.pointerId);
     return;
@@ -315,6 +312,14 @@ function onDown(e: PointerEvent): void {
 
 function onMove(e: PointerEvent): void {
   const { p, px, py } = evPt(e);
+  if (qedit) {
+    const dx = p[0] - qedit.start[0], dy = p[1] - qedit.start[1];
+    if (!qedit.changed && Math.hypot(dx, dy) < 0.002) return;
+    qedit.changed = true;
+    const c0 = qedit.qv.c;
+    qedit.c = [qedit.axis === "y" ? c0[0] : clampD(c0[0] + dx), qedit.axis === "x" ? c0[1] : clampD(c0[1] + dy)];
+    return drawOverlay();
+  }
   if (edit) {
     const dx = p[0] - edit.start[0], dy = p[1] - edit.start[1];
     if (!edit.changed && Math.hypot(dx, dy) < 0.002) return;
@@ -329,12 +334,28 @@ function onMove(e: PointerEvent): void {
     else draft.hover = p;
     return drawOverlay();
   }
-  if (state.tool === "select") g.overlay.style.cursor = hitHandle(px, py) ? "pointer" : hitGate(p) ? "move" : "default";
+  if (state.tool !== "select") return;
+  const hq = hitHandle(px, py) ? null : hitQuad(px, py);
+  g.overlay.style.cursor = hq ? (hq.axis === "both" ? "move" : hq.axis === "x" ? "ew-resize" : "ns-resize")
+    : hitHandle(px, py) ? "pointer" : hitGate(p) ? (quadMember(hitGate(p)!.node.id) ? "default" : "move") : "default";
 }
 
 function onUp(e: PointerEvent): void {
   if (g.overlay.hasPointerCapture(e.pointerId)) g.overlay.releasePointerCapture(e.pointerId);
   const axes = g.axes();
+  if (qedit) {
+    const qe = qedit;
+    if (!qe.changed) return void (qedit = null);
+    void run(async () => {
+      try {
+        await moveQuadSet(qe.qv.set, qe.qv.swap ? [qe.c[1], qe.c[0]] : [qe.c[0], qe.c[1]]);
+      } finally {
+        if (qedit === qe) qedit = null;
+        drawOverlay();
+      }
+    });
+    return;
+  }
   if (edit) {
     const ed = edit;
     if (!ed.changed) return void (edit = null);

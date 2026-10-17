@@ -5,7 +5,7 @@ import { makeFrame, setupCanvas } from "../plot/scale";
 import { emit, gatePath, isLoaded, selectSample, state } from "../state";
 import type { PopulationStats } from "../types";
 import { clear, fmtInt, fmtPct, h, pct } from "./dom";
-import { drawGates } from "./gating";
+import { drawGates } from "./gatedraw";
 import { run } from "./status";
 
 let root: HTMLElement;
