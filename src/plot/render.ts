@@ -2,7 +2,11 @@
 import type { HistResult, Plot2D, Tick } from "../types";
 import { colormap, lutCss } from "./colormap";
 import { marchingSquares, probabilityLevels, smooth } from "./contour";
-import { D0, DSPAN, type Frame, toPx, toPy } from "./scale";
+import { FULL, type Frame, type Range, toPx, toPy } from "./scale";
+
+/** Display-space window covered by a 2-D plot's grid and points. */
+export const plotRanges = (p: Plot2D): [Range, Range] => [p.header.x_range ?? FULL, p.header.y_range ?? FULL];
+const inside = (r: Range, v: number) => v >= r[0] - 1e-6 && v <= r[1] + 1e-6;
 
 export type PlotKind = "pseudo" | "density" | "contour";
 export type PlotData = { kind: "2d"; plot: Plot2D } | { kind: "hist"; hist: HistResult };
@@ -21,7 +25,8 @@ export interface Theme {
 export function readTheme(): Theme {
   const cs = getComputedStyle(document.documentElement);
   const v = (n: string, fb: string) => cs.getPropertyValue(n).trim() || fb;
-  const dark = document.documentElement.dataset.effectiveTheme === "dark";
+  const eff = document.documentElement.dataset.effectiveTheme;
+  const dark = eff === "dark" || eff === "dim";
   return {
     dark,
     bg: v("--bg", dark ? "#1e1e1e" : "#fff"),
@@ -94,6 +99,7 @@ export function drawAxes(
   ctx.textBaseline = "top";
   ctx.beginPath();
   for (const t of xTicks) {
+    if (!inside(f.xr, t.pos)) continue;
     const x = Math.round(toPx(f, t.pos)) + 0.5;
     const len = t.major ? 6 : 3;
     ctx.moveTo(x, f.top + f.h);
@@ -102,6 +108,7 @@ export function drawAxes(
   }
   ctx.textBaseline = "middle";
   for (const t of yTicks) {
+    if (!inside(f.yr, t.pos)) continue;
     const y = Math.round(toPy(f, t.pos)) + 0.5;
     const len = t.major ? 6 : 3;
     ctx.moveTo(f.left, y);
@@ -144,10 +151,11 @@ function drawPoints(ctx: CanvasRenderingContext2D, f: Frame, p: Plot2D, th: Them
     if (m) [sr, sg, sb] = [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)];
   }
   const lut = th.lut;
+  const xs = f.xr[1] - f.xr[0], ys = f.yr[1] - f.yr[0];
   for (let k = 0; k < p.n; k++) {
     const i = order[k];
-    const px = Math.floor(((p.x[i] - D0) / DSPAN) * pw);
-    const py = Math.floor((1 - (p.y[i] - D0) / DSPAN) * ph);
+    const px = Math.floor(((p.x[i] - f.xr[0]) / xs) * pw);
+    const py = Math.floor((1 - (p.y[i] - f.yr[0]) / ys) * ph);
     const d = p.d[i] * 3;
     const r = single ? sr : lut[d], g = single ? sg : lut[d + 1], b = single ? sb : lut[d + 2];
     for (let dy = 0; dy < size; dy++) {
@@ -195,7 +203,9 @@ function drawDensity(ctx: CanvasRenderingContext2D, f: Frame, p: Plot2D, th: The
   ctx.save();
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(c, 0, 0, bins, bins, f.left, f.top, f.w, f.h);
+  const [xr, yr] = plotRanges(p);
+  const x0 = toPx(f, xr[0]), x1 = toPx(f, xr[1]), y0 = toPy(f, yr[1]), y1 = toPy(f, yr[0]);
+  ctx.drawImage(c, 0, 0, bins, bins, x0, y0, x1 - x0, y1 - y0);
   ctx.restore();
 }
 
@@ -208,14 +218,15 @@ function drawContour(ctx: CanvasRenderingContext2D, f: Frame, p: Plot2D, th: The
   const outer = levels[0] ?? Infinity;
   // Outliers: events outside the outermost contour, drawn as faint dots.
   ctx.fillStyle = th.muted;
+  const [xr, yr] = plotRanges(p);
+  const cx = (xr[1] - xr[0]) / bins, cy = (yr[1] - yr[0]) / bins;
   for (let i = 0; i < p.n; i++) {
-    const bx = Math.min(bins - 1, Math.max(0, Math.floor(((p.x[i] - D0) / DSPAN) * bins)));
-    const by = Math.min(bins - 1, Math.max(0, Math.floor(((p.y[i] - D0) / DSPAN) * bins)));
+    const bx = Math.min(bins - 1, Math.max(0, Math.floor((p.x[i] - xr[0]) / cx)));
+    const by = Math.min(bins - 1, Math.max(0, Math.floor((p.y[i] - yr[0]) / cy)));
     if (grid[by * bins + bx] < outer) ctx.fillRect(toPx(f, p.x[i]) - 0.5, toPy(f, p.y[i]) - 0.5, 1, 1);
   }
-  const cell = DSPAN / bins;
-  const gx = (i: number) => toPx(f, D0 + (i + 0.5) * cell);
-  const gy = (j: number) => toPy(f, D0 + (j + 0.5) * cell);
+  const gx = (i: number) => toPx(f, xr[0] + (i + 0.5) * cx);
+  const gy = (j: number) => toPy(f, yr[0] + (j + 0.5) * cy);
   ctx.lineWidth = f.compact ? 0.8 : 1.1;
   levels.forEach((lv, k) => {
     const seg = marchingSquares(grid, bins, lv);
@@ -246,12 +257,14 @@ export function histYMax(h: HistResult): number {
   return Math.max(1, h.max_count * 1.08);
 }
 
-function drawHist(ctx: CanvasRenderingContext2D, f: Frame, h: HistResult, th: Theme): void {
+/** Count ticks mapped onto the frame's (linear) y range. */
+export const countTicks = (f: Frame, ymax: number): Tick[] =>
+  niceCountTicks(ymax).map((t) => ({ ...t, pos: f.yr[0] + (t.pos / ymax) * (f.yr[1] - f.yr[0]) }));
+
+function histPath(ctx: CanvasRenderingContext2D, f: Frame, h: HistResult, ymax: number): void {
   const [lo, hi] = h.range;
-  const ymax = histYMax(h);
   const bx = (i: number) => toPx(f, lo + ((hi - lo) * i) / h.bins);
   const by = (c: number) => f.top + f.h - (c / ymax) * f.h;
-  ctx.save();
   ctx.beginPath();
   ctx.moveTo(bx(0), by(0));
   h.counts.forEach((c, i) => {
@@ -260,14 +273,33 @@ function drawHist(ctx: CanvasRenderingContext2D, f: Frame, h: HistResult, th: Th
   });
   ctx.lineTo(bx(h.bins), by(0));
   ctx.closePath();
+}
+
+function drawHist(ctx: CanvasRenderingContext2D, f: Frame, h: HistResult, th: Theme, backdrop?: HistResult): void {
+  const ymax = Math.max(histYMax(h), backdrop ? histYMax(backdrop) : 0);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(f.left, f.top, f.w, f.h);
+  ctx.clip();
+  if (backdrop) {
+    histPath(ctx, f, backdrop, ymax);
+    ctx.fillStyle = th.muted;
+    ctx.globalAlpha = 0.16;
+    ctx.fill();
+    ctx.globalAlpha = 0.6;
+    ctx.strokeStyle = th.muted;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  histPath(ctx, f, h, ymax);
   ctx.fillStyle = lutCss(th.lut, 70, th.dark ? 0.45 : 0.3);
   ctx.fill();
   ctx.strokeStyle = lutCss(th.lut, 40);
   ctx.lineWidth = 1.2;
   ctx.stroke();
   ctx.restore();
-  const yt = niceCountTicks(ymax).map((t) => ({ ...t, pos: D0 + (t.pos / ymax) * DSPAN }));
-  drawAxes(ctx, f, th, h.ticks, yt, h.label, "Count");
+  drawAxes(ctx, f, th, h.ticks, countTicks(f, ymax), h.label, "Count");
 }
 
 // ---------------------------------------------------------------- entry
@@ -276,6 +308,8 @@ export interface RenderOptions {
   kind: PlotKind;
   /** Override colour (used for single-colour dot plots). */
   color?: string;
+  /** Drawn faintly behind the data (the parent population's events, "Show parent events"). */
+  backdrop?: PlotData | null;
 }
 
 export function renderPlot(ctx: CanvasRenderingContext2D, f: Frame, data: PlotData | null, opt: RenderOptions, th: Theme, message?: string): void {
@@ -299,10 +333,15 @@ export function renderPlot(ctx: CanvasRenderingContext2D, f: Frame, data: PlotDa
   ctx.clip();
   if (data.kind === "hist") {
     ctx.restore();
-    drawHist(ctx, f, data.hist, th);
+    drawHist(ctx, f, data.hist, th, opt.backdrop?.kind === "hist" ? opt.backdrop.hist : undefined);
     return;
   }
   const p = data.plot;
+  if (opt.backdrop?.kind === "2d") {
+    ctx.globalAlpha = th.dark ? 0.4 : 0.3;
+    drawPoints(ctx, f, opt.backdrop.plot, th, th.muted);
+    ctx.globalAlpha = 1;
+  }
   if (opt.kind === "density") drawDensity(ctx, f, p, th);
   else if (opt.kind === "contour") drawContour(ctx, f, p, th);
   else drawPoints(ctx, f, p, th, opt.color);

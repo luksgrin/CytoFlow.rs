@@ -69,7 +69,7 @@ type Tick            = { pos: number; label: string; major: boolean };  // pos i
 
 * Every sample owns its effective gate tree (`sample_gates[sampleId]`); all
   per-sample commands (`population_stats`, `channel_stats`, `plot_*`,
-  `export_population_csv`) resolve `gateId` in **that sample's** tree.
+  `export_population`, `export_population_csv`) resolve `gateId` in **that sample's** tree.
 * A group's `gates` are a *template*. The same population has the same gate id
   in the template and in every member's copy, so a gate id selected in one
   sample can be plotted in another sample of the group.
@@ -128,9 +128,10 @@ type Tick            = { pos: number; label: string; major: boolean };  // pos i
 | `population_stats` | `{ sampleId }` | `PopulationStats[]` — root ("All events", gate_id null) first, then gates in pre-order |
 | `channel_stats` | `{ sampleId, gateId: string\|null, channel, compensated }` | `ChannelStats` |
 | `axis_ticks` | `{ channel, sampleId?: string }` | `Tick[]` (that sample's effective transform, else the default) |
-| `plot_hist` | `{ sampleId, gateId: string\|null, x: GateDim, bins }` | `{ bins, counts: number[], max_count, total, range: [lo, hi], ticks: Tick[], label: string }` |
-| `plot_2d` | `{ sampleId, gateId: string\|null, x: GateDim, y: GateDim, bins, maxPoints }` | **binary** (see below) |
-| `export_population_csv` | `{ sampleId, gateId: string\|null, path, channels: string[]\|null, compensated, transformed }` | `number` (rows written) |
+| `plot_hist` | `{ sampleId, gateId: string\|null, x: GateDim, bins, range?: [lo, hi] }` | `{ bins, counts: number[], max_count, total, range: [lo, hi], ticks: Tick[], label: string }` — see *Zoomed views* |
+| `plot_2d` | `{ sampleId, gateId: string\|null, x: GateDim, y: GateDim, bins, maxPoints, xRange?: [lo, hi], yRange?: [lo, hi] }` | **binary** (see below) — see *Zoomed views* |
+| `export_population` | `{ sampleId, gateId: string\|null, path, format?: "csv"\|"xlsx"\|"parquet", channels: string[]\|null, compensated, transformed }` | `number` (rows written) — see *Population export* |
+| `export_population_csv` | `{ sampleId, gateId: string\|null, path, channels: string[]\|null, compensated, transformed }` | `number` (rows written) — alias of `export_population` with `format: "csv"` |
 | `export_image` | `{ path, base64Data }` | `null` — writes binary data (PNG/JPEG; a `data:` URL prefix is stripped) |
 | `write_text_file` | `{ path, contents }` | `null` — writes a UTF-8 text file (SVG, JSON) |
 | `export_stats_csv` | `{ path }` | `number` (rows) — one row per sample × population: sample, population path, count, %parent, %total |
@@ -144,16 +145,57 @@ Returned as `tauri::ipc::Response` (raw bytes); on the frontend `invoke` yields 
 ```
 u32  magic = 0x31504643  ("CFP1")
 u32  header_len
-u8[header_len]  header JSON: { x_label, y_label, x_ticks: Tick[], y_ticks: Tick[], total, max_count, bins }
+u8[header_len]  header JSON: { x_label, y_label, x_ticks: Tick[], y_ticks: Tick[], total, max_count, bins,
+                               x_range: [lo, hi], y_range: [lo, hi] }
 u32  bins
-u32[bins*bins]  counts   (index = y*bins + x; origin bottom-left; both axes cover display [-0.02, 1.02])
+u32[bins*bins]  counts   (index = y*bins + x; origin bottom-left; the grid covers x_range × y_range,
+                          [-0.02, 1.02] on both axes when no range was requested)
 u32  n
-f32[n] x        (display space, already clamped into range)
+f32[n] x        (display space, already clamped into the window)
 f32[n] y
 u8[n]  d        (0..255 log-density rank of the point's bin, for pseudo-colour)
 ```
 
-`maxPoints` caps `n` by even sub-sampling; the density grid always uses all events.
+`maxPoints` caps `n` by even sub-sampling of the events inside the window; the
+density grid always uses all of them. `total` is the number of events binned
+(= inside the window).
+
+### Zoomed views
+
+`plot_2d` (`xRange`, `yRange`) and `plot_hist` (`range`) take an optional
+display-space window `[lo, hi]`; omitted, invalid (non-finite, `hi <= lo`)
+windows mean the full axis `[-0.02, 1.02]`. The backend re-bins the events of
+the window at the requested `bins`, so a zoomed view has full resolution, and
+echoes the window it used (`x_range` / `y_range` in the `plot_2d` header,
+`range` in the `plot_hist` result). Events beyond a window edge that coincides
+with an edge of the full axis are piled into the edge cell (as un-zoomed);
+beyond an inner edge they are outside the view and not counted. Ticks
+(`x_ticks`, `y_ticks`, `ticks`) are those inside the window; when fewer than
+two labelled ticks would remain, round data values ("nice" steps, e.g. `20K`,
+`40K`) are generated instead so a zoomed axis stays readable. The graph window
+keeps the window per pair of axes; batch thumbnails, layout panels and SVG
+export always use the full range.
+
+### Population export
+
+`export_population` writes the events of `gateId` (`null` = all events) of a
+sample; `channels: null` (or `[]`) means every channel, `compensated` /
+`transformed` pick the values (transformed = display space, `0..1` spans the
+axis). `format` (default `"csv"`):
+
+* `"csv"` — header row of channel names, one row per event.
+* `"xlsx"` — Excel workbook with two sheets. `metadata`: rows `Field | Value`
+  with `sample`, `sample_file`, `population` (gate path), `events`,
+  `sample_events`, `workspace`, `exported_at` (UTC ISO 8601), `exported_by`,
+  `compensation` (none / FCS `$SPILLOVER` / custom matrix channels),
+  `compensated`, `values` (linear or transformed) and one `transform:<channel>`
+  row per exported channel (the transform JSON), then a blank row and every FCS
+  TEXT keyword of the sample (`FCS keyword | Value`). `data`: header row of
+  channel names, one row per event. Populations above Excel's limit of
+  1,048,575 data rows continue on `data_2`, `data_3`, ...
+* `"parquet"` — Apache Parquet (Snappy), one non-null `FLOAT` column per
+  channel, row groups of 1,048,576 events. The metadata fields above are stored
+  as file key/value metadata, the FCS keywords prefixed `fcs:` (e.g. `fcs:$CYT`).
 
 ## File dialogs
 

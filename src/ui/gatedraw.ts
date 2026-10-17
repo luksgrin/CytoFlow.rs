@@ -20,6 +20,8 @@ export interface GateDrawOpts {
   /** Colour for quadrant dividers and the parent outline (defaults to the theme). */
   lineColor?: string;
   mutedColor?: string;
+  /** Visible window of a zoomed plot: gate labels anchored outside it are dropped. */
+  view?: { xr: [number, number]; yr: [number, number] } | null;
 }
 
 export type StatLookup = (id: string) => PopulationStats | null;
@@ -52,7 +54,9 @@ export function gatePrims(axes: ViewAxes, parent: string | null, stats: StatLook
     const txt = `${compact ? "" : `${node.name} `}${pctText(stats(node.id))}`.trim();
     if (!txt) continue;
     let [ax, ay] = labelAnchor(v);
-    if (v.t === "rect" && v.min[1] === null && v.max[1] === null) ay = 0.93;
+    if (v.t === "rect" && v.min[1] === null && v.max[1] === null) ay = opts.view ? opts.view.yr[0] + 0.91 * (opts.view.yr[1] - opts.view.yr[0]) : 0.93;
+    const vw = opts.view;
+    if (vw && (ax < vw.xr[0] || ax > vw.xr[1] || ay < vw.yr[0] || ay > vw.yr[1])) continue;
     out.push({ k: "label", at: [ax, ay], text: txt, color: col, dir: [0, 0] });
   }
 

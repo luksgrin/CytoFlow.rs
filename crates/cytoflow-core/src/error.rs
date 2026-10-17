@@ -22,6 +22,8 @@ pub enum Error {
     Workspace(String),
     #[error("XML error: {0}")]
     Xml(String),
+    #[error("Export error: {0}")]
+    Export(String),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 }

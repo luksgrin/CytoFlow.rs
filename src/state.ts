@@ -7,7 +7,7 @@ import {
   type SampleInfo, type Transform, type WorkspaceView,
 } from "./types";
 
-export type Tool = "select" | "rect" | "polygon" | "ellipse" | "range" | "quadrant";
+export type Tool = "select" | "rect" | "polygon" | "lasso" | "ellipse" | "range" | "quadrant";
 export type EventName = "workspace" | "selection" | "axes" | "plotkind" | "tool" | "stats" | "theme" | "view" | "gatesel";
 
 export interface AppState {

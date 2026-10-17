@@ -23,8 +23,9 @@ export function initToolbar(root: HTMLElement): void {
   };
   on("selection", updScope);
   on("workspace", updScope);
-  const themeBtn = b("", "Theme: system / light / dark", () => updateTheme(cycleTheme()));
-  const updateTheme = (p = themePref()) => (themeBtn.textContent = p === "system" ? "◐ Auto" : p === "light" ? "☀ Light" : "☾ Dark");
+  const themeBtn = b("", "Theme: auto / light / dim / dark", () => updateTheme(cycleTheme()));
+  const THEME_LABEL = { system: "◐ Auto", light: "☀ Light", dim: "◑ Dim", dark: "☾ Dark" } as const;
+  const updateTheme = (p = themePref()) => (themeBtn.textContent = THEME_LABEL[p]);
   updateTheme();
   root.append(
     h("span", { class: "brand", text: "CytoFlow" }),
@@ -35,7 +36,7 @@ export function initToolbar(root: HTMLElement): void {
       b("Save…", "Save workspace (⌘S)", () => saveWorkspace(true))),
     h("div", { class: "tb-group" }, b("Import FlowJo .wsp…", "Import a FlowJo workspace", importWsp)),
     h("div", { class: "tb-group" },
-      b("Export population…", "Export events of the selected population as CSV", exportPopulation),
+      b("Export population…", "Export events of the selected population as CSV, Excel or Parquet", exportPopulation),
       b("Export stats…", "Export the statistics table as CSV", exportStats)),
     h("div", { class: "tb-group" },
       b("Compensation…", "Compensation matrix", openCompensation),

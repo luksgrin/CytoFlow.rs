@@ -175,3 +175,64 @@ export function moveShape(v: VShape, dx: number, dy: number): VShape {
   if (v.t === "ell") return { ...v, c: [v.c[0] + dx, v.c[1] + dy] };
   return { t: "rect", min: [mv(v.min[0], dx), mv(v.min[1], dy)], max: [mv(v.max[0], dx), mv(v.max[1], dy)] };
 }
+
+// ---------------------------------------------------------------- freehand (lasso) simplification
+
+function segDist(p: Pt, a: Pt, b: Pt): number {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const l2 = dx * dx + dy * dy;
+  const t = l2 > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2)) : 0;
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+
+/** Ramer–Douglas–Peucker on an open polyline (iterative), keeping both ends. */
+export function rdp(pts: Pt[], eps: number): Pt[] {
+  if (pts.length < 3) return pts.slice();
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const stack: [number, number][] = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [i, j] = stack.pop()!;
+    let best = -1, dmax = eps;
+    for (let k = i + 1; k < j; k++) {
+      const d = segDist(pts[k], pts[i], pts[j]);
+      if (d > dmax) (dmax = d), (best = k);
+    }
+    if (best < 0) continue;
+    keep[best] = 1;
+    stack.push([i, best], [best, j]);
+  }
+  return pts.filter((_, k) => keep[k]);
+}
+
+/**
+ * Simplify a closed freehand outline to at most `maxVertices` vertices: RDP on
+ * the two halves split at the point farthest from the start, growing the
+ * tolerance (starting at `eps`) until the vertex budget is met.
+ */
+export function simplifyClosed(pts: Pt[], maxVertices = 64, eps = 0.75): Pt[] {
+  const clean = pts.filter((p, i) => i === 0 || p[0] !== pts[i - 1][0] || p[1] !== pts[i - 1][1]);
+  if (clean.length <= 3) return clean;
+  let far = 0, dmax = -1;
+  clean.forEach((p, i) => {
+    const d = Math.hypot(p[0] - clean[0][0], p[1] - clean[0][1]);
+    if (d > dmax) (dmax = d), (far = i);
+  });
+  const ring = [...clean, clean[0]];
+  for (let e = eps, iter = 0; iter < 40; e *= 1.4, iter++) {
+    const a = rdp(ring.slice(0, far + 1), e);
+    const b = rdp(ring.slice(far), e);
+    const out = [...a, ...b.slice(1, -1)];
+    if (out.length <= maxVertices) return out;
+  }
+  // Fallback: even decimation.
+  const step = clean.length / maxVertices;
+  return Array.from({ length: maxVertices }, (_, i) => clean[Math.floor(i * step)]);
+}
+
+/** Absolute area of a closed polygon (shoelace). */
+export function polygonArea(v: Pt[]): number {
+  let a = 0;
+  for (let i = 0, j = v.length - 1; i < v.length; j = i++) a += (v[j][0] + v[i][0]) * (v[j][1] - v[i][1]);
+  return Math.abs(a / 2);
+}

@@ -2,7 +2,7 @@
 // mock (src/mock.ts) when not running inside Tauri.
 import type {
   ChannelStats, CompMatrix, CompSource, GateAddResult, GateDim, GateScope, GateShape, Group,
-  GroupCreateResult, HistResult, ImportResult, OpenResult, Plot2D, Plot2DHeader, PopulationStats,
+  ExportFormat, GroupCreateResult, HistResult, ImportResult, OpenResult, Plot2D, Plot2DHeader, PopulationStats,
   StoredLayout, Tick, Transform, TransformKind, WorkspaceView,
 } from "./types";
 
@@ -156,16 +156,26 @@ export const api = {
     call<ChannelStats>("channel_stats", { sampleId, gateId, channel, compensated }),
   axisTicks: (channel: string, sampleId: string | null = null) =>
     call<Tick[]>("axis_ticks", sampleId ? { channel, sampleId } : { channel }),
-  plotHist: (sampleId: string, gateId: string | null, x: GateDim, bins: number) =>
-    call<HistResult>("plot_hist", { sampleId, gateId, x, bins }),
+  /** `range` = visible display-space window (default: the full axis). */
+  plotHist: (sampleId: string, gateId: string | null, x: GateDim, bins: number, range: [number, number] | null = null) =>
+    call<HistResult>("plot_hist", range ? { sampleId, gateId, x, bins, range } : { sampleId, gateId, x, bins }),
+  /** `xRange` / `yRange` = visible display-space window (default: the full axes). */
   plot2d: async (
     sampleId: string, gateId: string | null, x: GateDim, y: GateDim, bins: number, maxPoints: number,
+    xRange: [number, number] | null = null, yRange: [number, number] | null = null,
   ): Promise<Plot2D> =>
-    parsePlot2D(await call<unknown>("plot_2d", { sampleId, gateId, x, y, bins, maxPoints })),
+    parsePlot2D(await call<unknown>("plot_2d", {
+      sampleId, gateId, x, y, bins, maxPoints, ...(xRange ? { xRange } : {}), ...(yRange ? { yRange } : {}),
+    })),
   exportPopulationCsv: (
     sampleId: string, gateId: string | null, path: string, channels: string[] | null,
     compensated: boolean, transformed: boolean,
   ) =>
     call<number>("export_population_csv", { sampleId, gateId, path, channels, compensated, transformed }),
+  /** Export a population's events; `channels: null` = every channel. Returns the rows written. */
+  exportPopulation: (opts: {
+    sampleId: string; gateId: string | null; path: string; format: ExportFormat;
+    channels: string[] | null; compensated: boolean; transformed: boolean;
+  }) => call<number>("export_population", { ...opts }),
   exportStatsCsv: (path: string) => call<number>("export_stats_csv", { path }),
 };

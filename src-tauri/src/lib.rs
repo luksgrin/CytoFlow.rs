@@ -59,6 +59,7 @@ pub fn run() {
             commands::plot_hist,
             commands::plot_2d,
             commands::export_population_csv,
+            commands::export_population,
             commands::export_stats_csv,
             commands::export_image,
             commands::write_text_file,

@@ -1,8 +1,8 @@
 // Gate overlay: draws child gates on the plot, drawing tools and gate editing.
 import { api } from "../ipc";
 import {
-  contains, dragHandle, fromView, handles, type Mapping, moveShape, normalize, outline,
-  type Pt, toView, type ViewAxes, type VShape,
+  contains, dragHandle, fromView, handles, type Mapping, moveShape, normalize, outline, polygonArea,
+  type Pt, simplifyClosed, toView, type ViewAxes, type VShape,
 } from "../plot/gates";
 import { movedShape, QUAD_SIGNS, quadIndex, quadToView, type QuadSet, type QuadView } from "../plot/quadrants";
 import { readTheme } from "../plot/render";
@@ -22,7 +22,12 @@ type Draft =
   | { t: "rect"; p0: Pt; p1: Pt }
   | { t: "ellipse"; p0: Pt; p1: Pt }
   | { t: "range"; x0: number; x1: number }
-  | { t: "polygon"; pts: Pt[]; hover: Pt | null };
+  | { t: "polygon"; pts: Pt[]; hover: Pt | null }
+  /** Freehand outline: display-space points plus their pixel positions (for simplification). */
+  | { t: "lasso"; pts: Pt[]; px: Pt[] };
+
+/** Vertex budget of a lasso gate after simplification. */
+export const LASSO_MAX_VERTICES = 64;
 
 interface Edit {
   id: string;
@@ -143,7 +148,7 @@ export function drawOverlay(): void {
   const axes = g.axes();
   if (!axes || !g.data()) return;
   const quadEdit = qedit ? { id: qedit.qv.set.ids.pp, c: qedit.c } : null;
-  drawGates(ctx, f, axes, state.gateId, statFor, { selected: state.plotGate, editV: edit?.v ?? null, quadEdit });
+  drawGates(ctx, f, axes, state.gateId, statFor, { selected: state.plotGate, editV: edit?.v ?? null, quadEdit, view: { xr: f.xr, yr: f.yr } });
   // Handles for the selected gate (quadrant members use the shared centre instead)
   const sel = state.plotGate ? visibleGates(axes, state.gateId).find((x) => x.node.id === state.plotGate) : null;
   const selQuad = sel ? quadMember(sel.node.id) : null;
@@ -180,7 +185,12 @@ export function drawOverlay(): void {
   if (draft.t === "rect") path(ctx, f, outline({ t: "rect", min: [Math.min(draft.p0[0], draft.p1[0]), Math.min(draft.p0[1], draft.p1[1])], max: [Math.max(draft.p0[0], draft.p1[0]), Math.max(draft.p0[1], draft.p1[1])] }));
   else if (draft.t === "ellipse") path(ctx, f, outline(ellipseFromBox(draft.p0, draft.p1)));
   else if (draft.t === "range") path(ctx, f, outline({ t: "rect", min: [Math.min(draft.x0, draft.x1), null], max: [Math.max(draft.x0, draft.x1), null] }));
-  else path(ctx, f, draft.hover ? [...draft.pts, draft.hover] : draft.pts, false);
+  else if (draft.t === "lasso") {
+    path(ctx, f, draft.pts, true);
+    ctx.globalAlpha = 0.08;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  } else path(ctx, f, draft.hover ? [...draft.pts, draft.hover] : draft.pts, false);
   ctx.stroke();
   ctx.setLineDash([]);
   if (draft.t === "polygon") for (const p of draft.pts) ctx.fillRect(toPx(f, p[0]) - 2.5, toPy(f, p[1]) - 2.5, 5, 5);
@@ -296,6 +306,7 @@ function onDown(e: PointerEvent): void {
   if (tool === "rect") draft = { t: "rect", p0: p, p1: p };
   else if (tool === "ellipse") draft = { t: "ellipse", p0: p, p1: p };
   else if (tool === "range") draft = { t: "range", x0: p[0], x1: p[0] };
+  else if (tool === "lasso" && axes.y) draft = { t: "lasso", pts: [p], px: [[px, py]] };
   else if (tool === "quadrant" && axes.y) return finishQuadrant(p, axes.x, axes.y);
   else if (tool === "polygon") {
     if (draft?.t !== "polygon") draft = { t: "polygon", pts: [p], hover: null };
@@ -331,7 +342,12 @@ function onMove(e: PointerEvent): void {
   if (draft) {
     if (draft.t === "rect" || draft.t === "ellipse") draft.p1 = p;
     else if (draft.t === "range") draft.x1 = p[0];
-    else draft.hover = p;
+    else if (draft.t === "lasso") {
+      const last = draft.px[draft.px.length - 1];
+      if (Math.hypot(px - last[0], py - last[1]) < 2) return;
+      draft.pts.push(p);
+      draft.px.push([px, py]);
+    } else draft.hover = p;
     return drawOverlay();
   }
   if (state.tool !== "select") return;
@@ -381,10 +397,25 @@ function onUp(e: PointerEvent): void {
     if (tiny(draft.p0, draft.p1)) return void cancelDrawing();
     const v = ellipseFromBox(draft.p0, draft.p1) as Extract<VShape, { t: "ell" }>;
     finish({ type: "ellipse", dims: [axes.x, axes.y], center: v.c, a: v.a, b: v.b, angle: 0 });
+  } else if (draft.t === "lasso" && axes.y) {
+    const shape = lassoShape(draft.px, f, axes.x, axes.y);
+    if (!shape) {
+      status.info("Lasso too small: drag around the population");
+      return void cancelDrawing();
+    }
+    finish(shape);
   } else if (draft.t === "range") {
     if (Math.abs(toPx(f, draft.x0) - toPx(f, draft.x1)) < 3) return void cancelDrawing();
     finish({ type: "rectangle", dims: [axes.x], min: [clampD(Math.min(draft.x0, draft.x1))], max: [clampD(Math.max(draft.x0, draft.x1))] });
   }
+}
+
+/** Close and simplify a freehand pixel path into a polygon gate (null if too small). */
+export function lassoShape(pxPts: Pt[], f: Frame, x: GateDim, y: GateDim): GateShape | null {
+  if (pxPts.length < 3 || polygonArea(pxPts) < 36) return null;
+  const simple = simplifyClosed(pxPts, LASSO_MAX_VERTICES);
+  if (simple.length < 3) return null;
+  return { type: "polygon", dims: [x, y], vertices: simple.map(([a, b]) => [clampD(fromPx(f, a)), clampD(fromPy(f, b))]) };
 }
 
 function onDbl(e: MouseEvent): void {
@@ -400,10 +431,11 @@ function onDbl(e: MouseEvent): void {
     closePolygon();
     return;
   }
-  if (state.tool === "select") {
-    const vis = hitGate(evPt(e).p);
-    if (vis) selectPopulation(vis.node.id);
-  }
+  const { p, px, py } = evPt(e);
+  const vis = state.tool === "select" ? hitGate(p) : null;
+  if (vis) return selectPopulation(vis.node.id);
+  // Double-click on empty plot area: back to the full axes.
+  if (!draft && inPlot(g.frame(), px, py)) g.resetView();
 }
 
 function onContext(e: MouseEvent): void {
