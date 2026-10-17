@@ -35,7 +35,9 @@ const BIEX_TOL: f64 = 0.0;
 /// The FlowJo ellipse on logicle axes: its geometry is exact on linear axes
 /// (tests/wsp_ellipse.rs), but on these logicle axes it undercounts FlowJo
 /// by 2.0 / 2.1 / 3.1 % (E03 / E05 / E01; 5875 vs 6002, 6010 vs 6133,
-/// 7032 vs 7256); see `ics_with_ellipse`.
+/// 7032 vs 7256); see `ics_with_ellipse`. The candidate display conventions
+/// tried to close the gap, none of which does without a fitted constant, are
+/// tabulated by `tests/wsp_ellipse_explore.rs`.
 const ELLIPSE_TOL: f64 = 0.035;
 
 struct Row {
