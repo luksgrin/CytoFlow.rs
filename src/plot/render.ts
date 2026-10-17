@@ -50,7 +50,7 @@ const SUPMAP: Record<string, string> = {
 };
 
 /** Split "10^3" / "10³" / "-10²" into base + exponent for typographic rendering. */
-function splitPower(label: string): [string, string] | null {
+export function splitPower(label: string): [string, string] | null {
   const m = /^(-?\d+(?:\.\d+)?)\^(-?\d+)$/.exec(label);
   if (m) return [m[1], m[2]];
   const u = /^(-?\d+)([⁰¹²³⁴-⁹⁻]+)$/.exec(label);
@@ -231,7 +231,7 @@ function drawContour(ctx: CanvasRenderingContext2D, f: Frame, p: Plot2D, th: The
 
 // ---------------------------------------------------------------- histogram
 
-function niceCountTicks(max: number): Tick[] {
+export function niceCountTicks(max: number): Tick[] {
   if (max <= 0) return [{ pos: 0, label: "0", major: true }];
   const raw = max / 4;
   const p = Math.pow(10, Math.floor(Math.log10(raw)));
