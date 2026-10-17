@@ -51,11 +51,12 @@ Click **Export…** and choose the file name. The status bar reports how many ev
 - Two sheets, **metadata** and **data**
 - **metadata**: the FCS file information and its keywords (TEXT segment), and the export settings (sample, population path, compensation, transformed)
 - **data**: the exported events, one column per channel
-- Excel worksheets hold at most 1,048,576 rows; use CSV or Parquet for larger populations
+- Excel worksheets hold at most 1,048,576 rows; larger populations continue on `data_2`, `data_3`, … sheets (CSV or Parquet are easier to work with at that size)
 
 ### Parquet
 
-- Compressed columnar format, one column per channel
+- Snappy-compressed columnar format, one float column per channel
+- The same metadata as the Excel `metadata` sheet is stored as file key/value metadata (FCS keywords are prefixed `fcs:`)
 - Efficient for large populations
 - Can be read by Python (`pandas.read_parquet`, `polars`), R (`arrow::read_parquet`) and other data analysis tools
 

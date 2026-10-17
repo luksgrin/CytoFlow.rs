@@ -79,10 +79,10 @@ Histograms are drawn as a filled outline of event counts over 256 bins. The plot
 | Action | Gesture |
 |---|---|
 | Zoom in / out around the cursor | Mouse wheel (or two-finger scroll / pinch on a trackpad) |
-| Pan | Right-click and drag, or hold ++space++ and drag with the left button |
-| Reset the view | Press **0** |
+| Pan | Right-click and drag, middle-click and drag, or hold ++space++ and drag with the left button (a right-click without dragging still opens the gate menu) |
+| Reset the view | Press **0**, click **Reset view**, or double-click an empty area of the plot |
 
-Zooming only changes what part of the display range you see: it does not change the axis scale, the gates or the statistics. You can draw and edit gates while zoomed in, which helps with small populations.
+Zooming only changes what part of the display range you see: it does not change the axis scale, the gates or the statistics. The plot is re-binned at full resolution for the visible window (after a short delay), the axis shows round-value ticks, and the header adds "*K* in view". Histograms zoom along X only; the view resets when you change channels, and batch thumbnails, layout panels and SVG exports always show the full range. You can draw and edit gates while zoomed in, which helps with small populations.
 
 ## Showing Parent Events
 
