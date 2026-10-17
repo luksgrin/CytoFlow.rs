@@ -1,0 +1,13 @@
+# Rust
+/target
+# Node
+node_modules
+dist
+# Tauri
+src-tauri/gen/schemas
+# macOS
+.DS_Store
+# Proprietary software must never be committed
+/FlowJo VX/
+# Large test data (fetched by scripts/fetch-testdata.sh)
+/testdata/large/

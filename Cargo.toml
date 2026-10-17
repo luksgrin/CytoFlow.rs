@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/cytoflow-core", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Lucas Goiriz"]
+repository = "https://github.com/luksgrin/CytoFlow.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
