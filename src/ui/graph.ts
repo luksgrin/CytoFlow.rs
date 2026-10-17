@@ -1,15 +1,29 @@
-// Centre column: graph window (toolbar, axis controls, plot canvases) and batch view.
+// Centre column: graph window (toolbar, axis controls, plot canvases), batch and layout views.
 import { api } from "../ipc";
+import { composite, copyPng } from "../plot/export";
 import type { ViewAxes } from "../plot/gates";
+import { NORM_LABEL, renderOverlay, type HistNorm, type OverlayStyle, type Series } from "../plot/overlay";
 import { type PlotData, type PlotKind, readTheme, renderPlot } from "../plot/render";
 import { type Frame, makeFrame, setupCanvas } from "../plot/scale";
 import { gatePath, isLoaded, on, sample, setTool, state, statFor, type Tool, emit } from "../state";
 import { initAxes } from "./axes";
 import { initBatch, refreshBatch } from "./batch";
 import { openBooleanDialog } from "./dialogs";
-import { fmtInt, h } from "./dom";
+import { clear, fmtInt, h } from "./dom";
 import { drawOverlay, initGating } from "./gating";
-import { status } from "./status";
+import { initLayout, refreshLayout } from "./layout";
+import {
+  clearOverlay, fetchSeries, initOverlay, onOverlayChange, openOverlayPicker, overlay as ov, overlayActive, setOverlayOption,
+} from "./overlay";
+import { run, status } from "./status";
+
+/** Centre-column views. `state.view` is typed graph|batch upstream; "layout" is added here. */
+export type View = "graph" | "batch" | "layout";
+export const currentView = (): View => state.view as View;
+export function setView(v: View): void {
+  (state as unknown as { view: View }).view = v;
+  emit("view");
+}
 
 export interface GraphCtx {
   frame(): Frame;
@@ -25,6 +39,10 @@ let titleEl: HTMLElement;
 let countEl: HTMLElement;
 let graphView: HTMLElement;
 let batchView: HTMLElement;
+let layoutView: HTMLElement;
+let ovBar: HTMLElement;
+let ovBtn: HTMLButtonElement;
+let series: Series[] | null = null;
 let frame: Frame = makeFrame(400, 400, 1);
 let data: PlotData | null = null;
 let message = "";
@@ -61,9 +79,11 @@ export function initGraph(root: HTMLElement): void {
     kindButtons.set(k, b);
     kinds.append(b);
   }
+  ovBtn = h("button", { class: "btn small", text: "Overlay…", title: "Overlay other populations and/or samples on this plot", onclick: () => void openOverlayPicker() });
+  const copyBtn = h("button", { class: "btn small", text: "Copy", title: "Copy this plot as a PNG image", onclick: () => void copyPlot() });
   const views = seg();
-  for (const [v, label] of [["graph", "Graph"], ["batch", "Batch"]] as const) {
-    const b = h("button", { class: "seg-btn text", text: label, onclick: () => ((state.view = v), emit("view")) });
+  for (const [v, label] of [["graph", "Graph"], ["batch", "Batch"], ["layout", "Layout"]] as const) {
+    const b = h("button", { class: "seg-btn text", text: label, onclick: () => setView(v) });
     viewButtons.set(v, b);
     views.append(b);
   }
@@ -73,16 +93,21 @@ export function initGraph(root: HTMLElement): void {
   base = h("canvas", { class: "plot-base" });
   overlay = h("canvas", { class: "plot-overlay", tabindex: 0 });
   wrap = h("div", { class: "plot-wrap" }, base, overlay);
-  graphView = h("div", { class: "graph-view" }, axesBar, wrap);
+  ovBar = h("div", { class: "overlay-bar" });
+  graphView = h("div", { class: "graph-view" }, axesBar, ovBar, wrap);
   batchView = h("div", { class: "batch-view" });
+  layoutView = h("div", { class: "layout-view" });
   root.append(
-    h("div", { class: "graph-head" }, tools, boolBtn, h("span", { class: "spacer" }), kinds, views),
+    h("div", { class: "graph-head" }, tools, boolBtn, h("span", { class: "spacer" }), copyBtn, ovBtn, kinds, views),
     h("div", { class: "graph-sub" }, titleEl, h("span", { class: "spacer" }), countEl),
-    graphView, batchView);
+    graphView, batchView, layoutView);
 
   initAxes(axesBar);
   initGating({ frame: () => frame, data: () => data, axes: viewAxes, overlay });
   initBatch(batchView);
+  initLayout(layoutView);
+  initOverlay();
+  onOverlayChange(() => (updateOverlayBar(), scheduleFetch()));
 
   new ResizeObserver(() => resize()).observe(wrap);
   on("workspace", scheduleFetch);
@@ -93,12 +118,44 @@ export function initGraph(root: HTMLElement): void {
   on("tool", updateButtons);
   on("stats", () => (updateTitle(), drawOverlay()));
   on("gatesel", drawOverlay);
-  on("view", () => (updateButtons(), refreshBatchIfVisible(), resize()));
+  on("view", () => (updateButtons(), refreshBatchIfVisible(), currentView() === "layout" && refreshLayout(), resize()));
   updateButtons();
+  updateOverlayBar();
 }
 
 function refreshBatchIfVisible(): void {
   if (state.view === "batch") refreshBatch();
+}
+
+function updateOverlayBar(): void {
+  clear(ovBar);
+  const active = overlayActive();
+  ovBar.hidden = !active;
+  ovBtn.classList.toggle("primary", active);
+  ovBtn.textContent = active ? `Overlay (${ov.items.length + 1})…` : "Overlay…";
+  if (!active) return;
+  const seg = (opts: [string, string][], cur: string, set: (v: string) => void) =>
+    h("div", { class: "segmented" }, ...opts.map(([v, label]) =>
+      h("button", { class: `seg-btn text${v === cur ? " active" : ""}`, text: label, onclick: () => set(v) })));
+  ovBar.append(
+    h("span", { class: "muted", text: `Overlay of ${ov.items.length + 1} series` }),
+    state.hist
+      ? seg((["mode", "total", "count"] as HistNorm[]).map((n) => [n, NORM_LABEL[n]]), ov.norm, (v) => setOverlayOption({ norm: v as HistNorm }))
+      : seg([["contour", "Contours"], ["dots", "Dots"]], ov.style, (v) => setOverlayOption({ style: v as OverlayStyle })),
+    h("span", { class: "spacer" }),
+    h("button", { class: "btn small", text: "Edit…", onclick: () => void openOverlayPicker() }),
+    h("button", { class: "btn small", text: "Clear", onclick: () => clearOverlay() }));
+}
+
+async function copyPlot(): Promise<void> {
+  if (!data) return status.error("Nothing to copy");
+  await run(async () => {
+    const s = sample();
+    const name = `${s?.name.replace(/\.[^.]+$/, "") ?? "plot"}_${(gatePath(state.gateId).split(" / ").pop() ?? "").replace(/[^\w.-]+/g, "_")}.png`;
+    const r = await copyPng(composite([base, overlay], readTheme().plotBg), name);
+    if (r === "copied") status.ok("Plot copied to the clipboard");
+    else if (r === "saved") status.ok(`Saved ${name}`);
+  });
 }
 
 function updateButtons(): void {
@@ -110,11 +167,12 @@ function updateButtons(): void {
   });
   kindButtons.forEach((b, k) => {
     b.classList.toggle("active", state.plotKind === k);
-    b.disabled = state.hist;
+    b.disabled = state.hist || overlayActive();
   });
-  viewButtons.forEach((b, v) => b.classList.toggle("active", state.view === v));
-  graphView.hidden = state.view !== "graph";
-  batchView.hidden = state.view !== "batch";
+  viewButtons.forEach((b, v) => b.classList.toggle("active", currentView() === v));
+  graphView.hidden = currentView() !== "graph";
+  batchView.hidden = currentView() !== "batch";
+  layoutView.hidden = currentView() !== "layout";
   overlay.style.cursor = state.tool === "select" ? "default" : "crosshair";
 }
 
@@ -139,13 +197,15 @@ export function render(): void {
   const ctx = base.getContext("2d");
   if (!ctx) return;
   ctx.setTransform(frame.dpr, 0, 0, frame.dpr, 0, 0);
-  renderPlot(ctx, frame, data, { kind: state.plotKind }, readTheme(), message);
+  if (series && data) renderOverlay(ctx, frame, series, { norm: ov.norm, style: ov.style }, readTheme());
+  else renderPlot(ctx, frame, data, { kind: state.plotKind }, readTheme(), message);
   drawOverlay();
 }
 
 function scheduleFetch(): void {
   updateTitle();
   updateButtons();
+  updateOverlayBar();
   window.clearTimeout(pendingFetch);
   pendingFetch = window.setTimeout(fetchData, 16);
   refreshBatchIfVisible();
@@ -155,9 +215,10 @@ async function fetchData(): Promise<void> {
   const my = ++seq;
   const sid = state.sampleId;
   const x = state.x, y = state.y;
-  const done = (d: PlotData | null, msg = "") => {
+  const done = (d: PlotData | null, msg = "", ser: Series[] | null = null) => {
     if (my !== seq) return;
     data = d;
+    series = ser;
     message = msg;
     render();
   };
@@ -165,6 +226,10 @@ async function fetchData(): Promise<void> {
   if (!isLoaded(sid)) return done(null, "Sample data not loaded (file missing)");
   if (!x || (!state.hist && !y)) return done(null, "Choose channels");
   try {
+    if (overlayActive()) {
+      const ser = await fetchSeries(x, state.hist ? null : y);
+      return done(ser[0]?.data ?? null, "", ser);
+    }
     if (state.hist) done({ kind: "hist", hist: await api.plotHist(sid, state.gateId, x, 256) });
     else done({ kind: "2d", plot: await api.plot2d(sid, state.gateId, x, y!, 256, 60000) });
   } catch (e) {

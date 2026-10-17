@@ -2,6 +2,8 @@
 import { gate, selectPopulation, setTool, state, type Tool } from "../state";
 import { deleteGate, openFcs, openWorkspace, saveWorkspace } from "./actions";
 import { cancelDrawing, closePolygon, deleteSelectedGate } from "./gating";
+import { currentView } from "./graph";
+import { deleteSelectedPanel } from "./layout";
 import { modalOpen } from "./modal";
 
 const TOOL_KEYS: Record<string, Tool> = { v: "select", r: "rect", p: "polygon", e: "ellipse", g: "range", q: "quadrant" };
@@ -23,6 +25,7 @@ export function initShortcuts(): void {
     if (e.key === "Enter" && closePolygon()) return void e.preventDefault();
     if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
+      if (currentView() === "layout") return void deleteSelectedPanel();
       if (!deleteSelectedGate() && state.gateId) void deleteGate(state.gateId);
       return;
     }
