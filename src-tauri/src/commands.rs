@@ -5,7 +5,7 @@ use crate::state::{AppState, Inner};
 use cytoflow_core::compensation::CompMatrix;
 use cytoflow_core::plot;
 use cytoflow_core::stats::ChannelStats;
-use cytoflow_core::workspace::{CompSource, PopulationStats};
+use cytoflow_core::workspace::{CompSource, GateScope, Group, PopulationStats};
 use cytoflow_core::{export, wsp, GateDim, GateShape, Transform, TransformKind, Workspace};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -54,8 +54,13 @@ pub struct Tick {
     major: bool,
 }
 
-fn ticks_for(ws: &Workspace, channel: &str) -> Vec<Tick> {
-    ws.transform_for(channel)
+/// Ticks of a channel's axis: the sample's effective transform when a sample
+/// is given, else the workspace default.
+fn ticks_for(ws: &Workspace, sample_id: Option<&str>, channel: &str) -> Vec<Tick> {
+    match sample_id {
+        Some(s) => ws.transform_for(s, channel),
+        None => ws.default_transform(channel),
+    }
         .ticks()
         .into_iter()
         .map(|(pos, label, major)| Tick { pos, label, major })
@@ -203,9 +208,17 @@ pub async fn sample_keywords(app: AppHandle, sample_id: String) -> CmdResult<BTr
 // ------------------------------------------------- transforms & compensation
 
 #[tauri::command]
-pub async fn channel_set_transform(app: AppHandle, channel: String, transform: Transform) -> CmdResult<Value> {
+pub async fn channel_set_transform(
+    app: AppHandle,
+    channel: String,
+    transform: Transform,
+    sample_id: Option<String>,
+) -> CmdResult<Value> {
     with_state(app, move |st| {
-        st.workspace.set_transform(&channel, transform);
+        match sample_id {
+            Some(s) => st.workspace.set_sample_transform(&s, &channel, transform).map_err(err)?,
+            None => st.workspace.set_transform(&channel, transform),
+        }
         st.view()
     })
     .await
@@ -257,15 +270,18 @@ pub async fn gate_add(
     parent: Option<String>,
     shape: GateShape,
     negate: bool,
+    scope: Option<GateScope>,
 ) -> CmdResult<Value> {
     with_state(app, move |st| {
-        let id = st.workspace.add_gate(&name, parent.as_deref(), shape, negate).map_err(err)?;
+        let scope = scope.unwrap_or_default();
+        let id = st.workspace.add_gate_in(&scope, &name, parent.as_deref(), shape, negate).map_err(err)?;
         Ok(json!({ "id": id, "workspace": st.view()? }))
     })
     .await
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn gate_update(
     app: AppHandle,
     gate_id: String,
@@ -273,18 +289,63 @@ pub async fn gate_update(
     name: Option<String>,
     negate: Option<bool>,
     color: Option<Option<String>>,
+    scope: Option<GateScope>,
 ) -> CmdResult<Value> {
     with_state(app, move |st| {
-        st.workspace.update_gate(&gate_id, shape, name.as_deref(), negate, color).map_err(err)?;
+        let scope = scope.unwrap_or_default();
+        st.workspace.update_gate_in(&scope, &gate_id, shape, name.as_deref(), negate, color).map_err(err)?;
         st.view()
     })
     .await
 }
 
 #[tauri::command]
-pub async fn gate_remove(app: AppHandle, gate_id: String) -> CmdResult<Value> {
+pub async fn gate_remove(app: AppHandle, gate_id: String, scope: Option<GateScope>) -> CmdResult<Value> {
     with_state(app, move |st| {
-        st.workspace.remove_gate(&gate_id).map_err(err)?;
+        st.workspace.remove_gate_in(&scope.unwrap_or_default(), &gate_id).map_err(err)?;
+        st.view()
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn gate_copy_to_group(app: AppHandle, gate_id: String, from_sample_id: String, group_id: String) -> CmdResult<Value> {
+    with_state(app, move |st| {
+        st.workspace.copy_gate_to_group(&gate_id, &from_sample_id, &group_id).map_err(err)?;
+        st.view()
+    })
+    .await
+}
+
+// ---------------------------------------------------------------- groups
+
+#[tauri::command]
+pub async fn group_list(app: AppHandle) -> CmdResult<Vec<Group>> {
+    with_state(app, |st| Ok(st.workspace.groups.clone())).await
+}
+
+#[tauri::command]
+pub async fn group_create(app: AppHandle, name: String, sample_ids: Vec<String>) -> CmdResult<Value> {
+    with_state(app, move |st| {
+        let id = st.workspace.create_group(&name, &sample_ids).map_err(err)?;
+        Ok(json!({ "id": id, "workspace": st.view()? }))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn group_set_members(app: AppHandle, group_id: String, sample_ids: Vec<String>) -> CmdResult<Value> {
+    with_state(app, move |st| {
+        st.workspace.set_group_members(&group_id, &sample_ids).map_err(err)?;
+        st.view()
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn group_remove(app: AppHandle, group_id: String) -> CmdResult<Value> {
+    with_state(app, move |st| {
+        st.workspace.remove_group(&group_id).map_err(err)?;
         st.view()
     })
     .await
@@ -316,8 +377,8 @@ pub async fn channel_stats(
 // ----------------------------------------------------------------- plots
 
 #[tauri::command]
-pub async fn axis_ticks(app: AppHandle, channel: String) -> CmdResult<Vec<Tick>> {
-    with_state(app, move |st| Ok(ticks_for(&st.workspace, &channel))).await
+pub async fn axis_ticks(app: AppHandle, channel: String, sample_id: Option<String>) -> CmdResult<Vec<Tick>> {
+    with_state(app, move |st| Ok(ticks_for(&st.workspace, sample_id.as_deref(), &channel))).await
 }
 
 #[tauri::command]
@@ -333,7 +394,7 @@ pub async fn plot_hist(
         let ws = &mut st.workspace;
         let mask = mask_for(ws, &sample_id, gate_id.as_deref())?;
         let xs = ws.transformed(&sample_id, &x.channel, x.compensated).map_err(err)?;
-        Ok((xs, mask, ticks_for(ws, &x.channel), axis_label(ws, &sample_id, &x)))
+        Ok((xs, mask, ticks_for(ws, Some(&sample_id), &x.channel), axis_label(ws, &sample_id, &x)))
     })
     .await?;
     blocking(move || {
@@ -373,8 +434,8 @@ pub async fn plot_2d(
         let header = json!({
             "x_label": axis_label(ws, &sample_id, &x),
             "y_label": axis_label(ws, &sample_id, &y),
-            "x_ticks": ticks_for(ws, &x.channel),
-            "y_ticks": ticks_for(ws, &y.channel),
+            "x_ticks": ticks_for(ws, Some(&sample_id), &x.channel),
+            "y_ticks": ticks_for(ws, Some(&sample_id), &y.channel),
         });
         Ok((xs, ys, mask, header))
     })
@@ -456,7 +517,6 @@ pub async fn export_population_csv(
 pub async fn export_stats_csv(app: AppHandle, path: String) -> CmdResult<usize> {
     let rows = with_state(app, |st| {
         let ws = &mut st.workspace;
-        let order = ws.preorder();
         let samples: Vec<(String, String)> = ws
             .samples
             .iter()
@@ -465,11 +525,13 @@ pub async fn export_stats_csv(app: AppHandle, path: String) -> CmdResult<usize> 
             .collect();
         let mut rows = Vec::new();
         for (id, name) in samples {
+            // Each sample's own gate tree.
+            let order = ws.preorder(&id);
             let pops = std::iter::once(None).chain(order.iter().map(|g| Some(g.as_str())));
             for g in pops {
                 let s = ws.population_stats(&id, g).map_err(err)?;
                 let pop_path = match g {
-                    Some(g) => ws.gate_path(g),
+                    Some(g) => ws.gate_path(&id, g),
                     None => s.name.clone(),
                 };
                 rows.push(vec![

@@ -13,7 +13,9 @@ pub struct Inner {
 }
 
 impl Inner {
-    /// `serde_json` of the workspace plus `loaded` and `path` (the `WorkspaceView`).
+    /// `serde_json` of the workspace (`groups`, `sample_gates`,
+    /// `sample_channel_settings`, ...) plus `gates` (the "All Samples"
+    /// template, as in version 1), `loaded` and `path`: the `WorkspaceView`.
     pub fn view(&self) -> Result<Value, String> {
         let mut v = serde_json::to_value(&self.workspace).map_err(|e| e.to_string())?;
         let loaded: Vec<String> = self
@@ -24,6 +26,7 @@ impl Inner {
             .map(|s| s.id.clone())
             .collect();
         if let Value::Object(map) = &mut v {
+            map.insert("gates".into(), serde_json::to_value(self.workspace.gates()).map_err(|e| e.to_string())?);
             map.insert("loaded".into(), serde_json::to_value(loaded).map_err(|e| e.to_string())?);
             map.insert(
                 "path".into(),
